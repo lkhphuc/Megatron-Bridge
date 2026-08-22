@@ -19,6 +19,7 @@ from inspect import Parameter, signature
 from typing import Any, Iterable
 
 import torch
+from megatron.core import parallel_state
 from megatron.core.models.gpt import GPTModel
 from megatron.core.pipeline_parallel.utils import is_pp_first_stage, is_pp_last_stage
 from megatron.core.utils import get_model_config
@@ -162,27 +163,44 @@ def get_batch_from_iterator(
     return _batch_required_keys
 
 
-def get_batch(data_iterator: Iterable, cfg: ConfigContainer, use_mtp: bool = False, *, pg_collection) -> tuple[...]:
+def get_batch(
+    data_iterator: Iterable,
+    cfg: ConfigContainer,
+    use_mtp: bool = False,
+    *,
+    pg_collection,
+    is_first_pp_stage: bool | None = None,
+    is_last_pp_stage: bool | None = None,
+) -> tuple[...]:
     """Generate a batch.
 
     Args:
         data_iterator: Input data iterator
         cfg: Configuration container
         use_mtp: Whether Multi-Token Prediction layers are enabled
+        is_first_pp_stage: Whether this forward step runs the first global pipeline
+            stage. Under VPP this is rank-level ``is_pp_first_stage`` *and* the
+            model chunk being stepped is chunk 0; ``None`` falls back to the
+            rank-level check.
+        is_last_pp_stage: Whether this forward step runs the last global pipeline
+            stage (rank-level last stage *and* the last model chunk under VPP);
+            ``None`` falls back to the rank-level check.
 
     Returns:
         tuple of tensors containing tokens, labels, loss_mask, attention_mask,
-        position_ids, packed sequence metadata, and visual_inputs.
+            position_ids, packed sequence metadata, and visual_inputs.
     """
-    is_first = is_pp_first_stage(pg_collection.pp)
-    is_last = is_pp_last_stage(pg_collection.pp)
+    if is_first_pp_stage is None:
+        is_first_pp_stage = is_pp_first_stage(pg_collection.pp)
+    if is_last_pp_stage is None:
+        is_last_pp_stage = is_pp_last_stage(pg_collection.pp)
 
     batch = get_batch_from_iterator(
         data_iterator,
         use_mtp,
         getattr(cfg.dataset, "skip_getting_attention_mask_from_dataset", True),
-        is_first_pp_stage=is_first,
-        is_last_pp_stage=is_last,
+        is_first_pp_stage=is_first_pp_stage,
+        is_last_pp_stage=is_last_pp_stage,
     )
 
     visual_inputs = batch.get("visual_inputs")
@@ -227,6 +245,18 @@ def forward_step(
 
     timers("batch-generator", log_level=2).start()
     pg_collection = get_pg_collection(model)
+    # Chunk-aware pipeline boundaries: with virtual pipeline parallelism a rank
+    # holds several model chunks, but only chunk 0 of the first PP rank is the
+    # global first stage (vision embedding / pre_process) and only the last
+    # chunk of the last PP rank is the global last stage (loss). Core ignores
+    # visual kwargs on non-pre_process chunks, so this is mostly payload
+    # hygiene — dropping pixels/labels early keeps them off chunk-local copies.
+    vp_size = parallel_state.get_virtual_pipeline_model_parallel_world_size()
+    vp_stage = get_model_chunk_vp_stage(model)
+    rank_is_first = is_pp_first_stage(pg_collection.pp)
+    rank_is_last = is_pp_last_stage(pg_collection.pp)
+    is_first_stage = rank_is_first and (vp_size is None or vp_size <= 1 or vp_stage in (None, 0))
+    is_last_stage = rank_is_last and (vp_size is None or vp_size <= 1 or vp_stage in (None, vp_size - 1))
     with straggler_timer(bdata=True):
         (
             tokens,
@@ -236,7 +266,14 @@ def forward_step(
             position_ids,
             packed_seq_params,
             visual_inputs,
-        ) = get_batch(data_iterator, state.cfg, use_mtp, pg_collection=pg_collection)
+        ) = get_batch(
+            data_iterator,
+            state.cfg,
+            use_mtp,
+            pg_collection=pg_collection,
+            is_first_pp_stage=is_first_stage,
+            is_last_pp_stage=is_last_stage,
+        )
     timers("batch-generator").stop()
 
     # Accumulate FLOPS metadata across micro-batches. Passing ``cu_seqlens`` gives

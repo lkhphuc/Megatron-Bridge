@@ -1895,6 +1895,11 @@ def maybe_save_dataloader_state(
     if train_iterator is None or dataloader_save_path is None or dataloader_save_path == "":
         return
 
+    # VPP per-chunk iterator views share one underlying source iterable
+    # (see ``make_data_iterator_list``); save the shared source once.
+    if isinstance(train_iterator, list):
+        train_iterator = train_iterator[0]
+
     # If dataloader doesn't support saving state, raise an error.
     if not hasattr(train_iterator.iterable, "save_state"):
         raise RuntimeError(f"Could not find a save_state for the train_iterator of type {type(train_iterator)}")
@@ -1984,9 +1989,11 @@ def maybe_load_dataloader_state(
     """
     if train_iterator is None or not dataloader_load_path:
         return
-    # VPP yields a list of iterators; dataloader-state save/restore handles the single-iterator case.
+    # VPP per-chunk iterator views share one underlying source iterable
+    # (see ``make_data_iterator_list``), so unwrap the list and restore the
+    # shared source once instead of silently skipping the restore.
     if isinstance(train_iterator, list):
-        return
+        train_iterator = train_iterator[0]
     iterable = getattr(train_iterator, "iterable", None)
     if iterable is None or not hasattr(iterable, "restore_state"):
         return

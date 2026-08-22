@@ -46,7 +46,6 @@ from megatron.core.pipeline_parallel.schedules import (
     get_forward_backward_func,
 )
 from megatron.core.pipeline_parallel.utils import (
-    is_pp_first_stage,
     is_pp_last_stage,
 )
 from megatron.core.process_groups_config import ProcessGroupCollection
@@ -1627,7 +1626,10 @@ def _dummy_train_step(
     This function consumes data from the iterator without performing any actual computation,
     effectively skipping the iteration while maintaining data iterator consistency.
 
-    Advance the data iterator on first and last PP stages when data_iterator is not None.
+    Advance the data iterator on *every* PP stage. Each pipeline stage pulls its own
+    copy of the batch from its data iterator inside the real forward step (e.g.
+    ``vlm_step.get_batch`` runs on all ranks), so skipping an iteration without
+    consuming on middle stages would desync them from the first/last stages.
 
     Args:
         global_state: Global state containing configuration
@@ -1638,16 +1640,14 @@ def _dummy_train_step(
     rerun_state_machine = get_rerun_state_machine()
 
     while rerun_state_machine.should_run_forward_backward(train_data_iterator):
-        pp_group = pg_collection.pp
-        if is_pp_first_stage(pp_group) or is_pp_last_stage(pp_group):
-            if train_data_iterator is not None:
-                if cfg.dataset.dataloader_type == "batch":
-                    # Finetuning: Consume global batch once
+        if train_data_iterator is not None:
+            if cfg.dataset.dataloader_type == "batch":
+                # Finetuning: Consume global batch once
+                _ = next(train_data_iterator)
+            else:
+                # Pretrain: Consume microbatches one at a time
+                for _ in range(num_microbatches):
                     _ = next(train_data_iterator)
-                else:
-                    # Pretrain: Consume microbatches one at a time
-                    for _ in range(num_microbatches):
-                        _ = next(train_data_iterator)
 
 
 def _handle_mxfp8_param_buffer_copy(
