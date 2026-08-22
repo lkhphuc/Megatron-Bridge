@@ -145,6 +145,32 @@ def test_qwen_factory_preserves_limits_and_deferred_packing(monkeypatch: pytest.
     )
 
 
+def test_falcon_factory_constructs_falcon_task_encoder(monkeypatch: pytest.MonkeyPatch):
+    """The Falcon config (a Qwen-config subclass) must select FalconTaskEncoder."""
+    from megatron.bridge.models.falcon_mm.data.energon import FalconEnergonTaskEncoderConfig
+
+    config = _qwen_config(task_encoder=FalconEnergonTaskEncoderConfig(hf_processor_path="Qwen/model"))
+    encoder = object()
+    falcon_encoder_cls = MagicMock(return_value=encoder)
+    qwen_encoder_cls = MagicMock(return_value=object())
+    monkeypatch.setattr("megatron.bridge.data.builders.energon.is_safe_repo", lambda **_: False)
+    monkeypatch.setattr(
+        "megatron.bridge.data.builders.energon.AutoTokenizer.from_pretrained",
+        lambda *_, **__: object(),
+    )
+    monkeypatch.setattr(
+        "megatron.bridge.data.builders.energon.Qwen3VLProcessor.from_pretrained",
+        lambda *_, **__: object(),
+    )
+    monkeypatch.setattr("megatron.bridge.models.falcon_mm.data.energon.FalconTaskEncoder", falcon_encoder_cls)
+    monkeypatch.setattr("megatron.bridge.models.qwen_vl.data.energon.QwenVLTaskEncoder", qwen_encoder_cls)
+
+    assert build_energon_task_encoder(config) is encoder
+
+    falcon_encoder_cls.assert_called_once()
+    qwen_encoder_cls.assert_not_called()
+
+
 def test_qwen_config_rejects_empty_processor_revision():
     config = _qwen_config(
         task_encoder=QwenVLEnergonTaskEncoderConfig(

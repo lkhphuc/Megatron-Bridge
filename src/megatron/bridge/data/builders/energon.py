@@ -95,6 +95,71 @@ class QwenVLEnergonTaskEncoderConfig:
             if value is not None and value <= 0:
                 raise ValueError(f"{field_name} must be greater than 0 when set.")
 
+    def build_task_encoder(
+        self,
+        config: "EnergonDatasetConfig",
+        *,
+        effective_packing: bool,
+        enable_energon_packing: bool,
+        trust_remote_code: bool,
+    ) -> Any:
+        """Construct the Qwen-VL task encoder for these settings at runtime.
+
+        Qwen-family subclasses (e.g. Falcon-MM) override this method so the
+        builder dispatches polymorphically instead of isinstance-chaining.
+        """
+        from megatron.bridge.models.qwen_vl.data.energon import QwenVLTaskEncoder
+
+        tokenizer, image_processor = self._load_hf_processors(trust_remote_code)
+        return QwenVLTaskEncoder(
+            tokenizer=tokenizer,
+            image_processor=image_processor,
+            **self._task_encoder_kwargs(
+                config,
+                effective_packing=effective_packing,
+                enable_energon_packing=enable_energon_packing,
+            ),
+        )
+
+    def _load_hf_processors(self, trust_remote_code: bool) -> tuple[Any, Any]:
+        """Load the HF tokenizer and Qwen3-VL processor for ``hf_processor_path``."""
+        tokenizer = AutoTokenizer.from_pretrained(
+            self.hf_processor_path,
+            revision=self.hf_processor_revision,
+            trust_remote_code=trust_remote_code,
+        )
+        image_processor = Qwen3VLProcessor.from_pretrained(
+            self.hf_processor_path,
+            revision=self.hf_processor_revision,
+            trust_remote_code=trust_remote_code,
+        )
+        return tokenizer, image_processor
+
+    def _task_encoder_kwargs(
+        self,
+        config: "EnergonDatasetConfig",
+        *,
+        effective_packing: bool,
+        enable_energon_packing: bool,
+    ) -> dict[str, Any]:
+        """Constructor keyword arguments shared by Qwen-family task encoders."""
+        return dict(
+            temporal_patch_size=self.temporal_patch_size,
+            spatial_merge_size=self.spatial_merge_size,
+            patch_size=self.patch_size,
+            max_padding_length=config.seq_length,
+            min_pixels=self.min_pixels,
+            max_pixels=self.max_pixels,
+            max_num_images=self.max_num_images,
+            max_num_frames=self.max_num_frames,
+            max_visual_tokens=self.max_visual_tokens,
+            pad_to_max_length=config.pad_to_max_length,
+            pad_to_multiple_of=config.pad_to_multiple_of,
+            enable_in_batch_packing=effective_packing,
+            enable_energon_packing=enable_energon_packing,
+            in_batch_packing_pad_to_multiple_of=config.in_batch_packing_pad_to_multiple_of,
+        )
+
 
 @dataclass(kw_only=True)
 class NemotronOmniEnergonTaskEncoderConfig:
@@ -280,35 +345,14 @@ def build_energon_task_encoder(config: EnergonDatasetConfig) -> Any:
         )
 
     if isinstance(task_config, QwenVLEnergonTaskEncoderConfig):
-        from megatron.bridge.models.qwen_vl.data.energon import QwenVLTaskEncoder
-
-        tokenizer = AutoTokenizer.from_pretrained(
-            task_config.hf_processor_path,
-            revision=task_config.hf_processor_revision,
-            trust_remote_code=trust_remote_code,
-        )
-        image_processor = Qwen3VLProcessor.from_pretrained(
-            task_config.hf_processor_path,
-            revision=task_config.hf_processor_revision,
-            trust_remote_code=trust_remote_code,
-        )
-        return QwenVLTaskEncoder(
-            tokenizer=tokenizer,
-            image_processor=image_processor,
-            temporal_patch_size=task_config.temporal_patch_size,
-            spatial_merge_size=task_config.spatial_merge_size,
-            patch_size=task_config.patch_size,
-            max_padding_length=config.seq_length,
-            min_pixels=task_config.min_pixels,
-            max_pixels=task_config.max_pixels,
-            max_num_images=task_config.max_num_images,
-            max_num_frames=task_config.max_num_frames,
-            max_visual_tokens=task_config.max_visual_tokens,
-            pad_to_max_length=config.pad_to_max_length,
-            pad_to_multiple_of=config.pad_to_multiple_of,
-            enable_in_batch_packing=effective_packing,
+        # Polymorphic dispatch for the whole Qwen THD-packing family: the
+        # Falcon config subclasses the Qwen config and overrides
+        # build_task_encoder, so no isinstance disambiguation is needed here.
+        return task_config.build_task_encoder(
+            config,
+            effective_packing=effective_packing,
             enable_energon_packing=enable_energon_packing,
-            in_batch_packing_pad_to_multiple_of=config.in_batch_packing_pad_to_multiple_of,
+            trust_remote_code=trust_remote_code,
         )
 
     from megatron.bridge.data.energon.nemotron_omni_task_encoder import NemotronOmniTaskEncoder
