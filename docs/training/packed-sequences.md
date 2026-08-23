@@ -166,13 +166,17 @@ The durable constraints for packed sequences in Bridge are:
   DistTrain; MTP is supported via MCore's packed sequence boundary-aware
   token rolling; requested MoE expert-parallel communication overlap is
   disabled with a warning so training uses the non-overlapped path
-- Pipeline parallelism is supported and verified: every PP stage pulls
-  identical fixed-width packs from its own loader (pure DP-rank sharding),
-  `pad_to_max_length` is forced on automatically for PP>1 or EP>1 so p2p
-  shapes stay static, and packed metadata (`cu_seqlens`, `grid_thw`) is
-  threaded on all stages (PP=2 loss parity vs PP=1, checkpoint + loader-state
-  resume parity). Virtual pipeline parallelism is rejected with an error: the
-  VPP forward is not yet numerically correct for the packed THD path
+- Pipeline parallelism (including virtual pipeline parallelism) is supported
+  and verified: every PP stage pulls identical fixed-width packs from its own
+  loader (pure DP-rank sharding), `pad_to_max_length` is forced on
+  automatically for PP>1 or EP>1 so p2p shapes stay static (the dynamic
+  `variable_seq_lengths` shape exchange is skipped for such fixed-width packs),
+  and packed metadata (`cu_seqlens`, `grid_thw`) is threaded on all stages.
+  PP=2 loss parity vs PP=1 and checkpoint + loader-state resume parity are
+  verified. Under VPP, batched p2p communication
+  (`batch_p2p_comm`/`batch_p2p_sync`) is force-disabled with a warning:
+  batched `isend/irecv` mispairs activation and gradient traffic on shared
+  rank pairs under the interleaved schedule, silently corrupting training
 - when context parallelism is used, sequence length must satisfy the standard
   CP divisibility constraints
 - GPT-SFT and Direct-HF sequence length must also satisfy the LCM of the training and

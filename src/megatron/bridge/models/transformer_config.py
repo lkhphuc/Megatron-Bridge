@@ -19,6 +19,7 @@ override system while maintaining compatibility with Megatron Core's post_init b
 """
 
 import copy
+import logging
 from dataclasses import dataclass, field, fields, is_dataclass
 
 from megatron.core.transformer.heterogeneous.heterogeneous_config import (
@@ -26,6 +27,9 @@ from megatron.core.transformer.heterogeneous.heterogeneous_config import (
 )
 from megatron.core.transformer.transformer_config import MLATransformerConfig as MCoreMLATransformerConfig
 from megatron.core.transformer.transformer_config import TransformerConfig as MCoreTransformerConfig
+
+
+logger = logging.getLogger(__name__)
 
 
 def _safe_asdict(obj, skip_keys: set[str]) -> dict:
@@ -192,9 +196,33 @@ class TransformerConfig(MCoreTransformerConfig):
         # In-batch packing produces variable-length packed sequences across microbatches,
         # so PP stages must communicate tensor shapes dynamically instead of using static
         # buffers.  Set *after* __post_init__ to avoid the false-positive MoE allgather
-        # dispatcher check (irrelevant for non-MoE models).
-        if getattr(self, "_enable_in_batch_packing", False) and self.pipeline_model_parallel_size > 1:
+        # dispatcher check (irrelevant for non-MoE models).  When packs are fixed-width
+        # (pad_to_max_length, forced for PP>1/EP>1), shapes are static and the dynamic
+        # shape exchange is skipped: it costs a blocking sync per p2p and is not safe
+        # with interleaved (virtual pipeline) schedules, whose batched op ordering does
+        # not pair with the per-op shape sync.
+        if (
+            getattr(self, "_enable_in_batch_packing", False)
+            and self.pipeline_model_parallel_size > 1
+            and not getattr(self, "_packed_shapes_static", False)
+        ):
             self.variable_seq_lengths = True
+
+        # Batched p2p (batch_isend_irecv grouping payload+sync ops) mispairs
+        # send/recv traffic under interleaved (virtual pipeline) schedules when
+        # several chunk-pairs share one physical rank pair: activations get
+        # delivered where gradients belong (verified: bit-identical activation
+        # stats arriving as output grads -> exploding loss ~ln(vocab)).  Disable
+        # the batching for VPP; individual p2p ops match FIFO and are correct.
+        if (self.virtual_pipeline_model_parallel_size or 1) > 1 and self.pipeline_model_parallel_size > 1:
+            if getattr(self, "batch_p2p_comm", False) or getattr(self, "batch_p2p_sync", False):
+                logger.warning(
+                    "Disabling batched p2p communication (batch_p2p_comm/batch_p2p_sync) for VPP"
+                    " because batched isend/irecv mispairs activation and gradient traffic"
+                    " on shared rank pairs under the interleaved schedule."
+                )
+                self.batch_p2p_comm = False
+                self.batch_p2p_sync = False
 
     def _finalize_gtp_weight_shards(self) -> None:
         """Derive rematerialization sizes from optional logical weight-shard counts."""

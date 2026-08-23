@@ -1403,6 +1403,11 @@ class ConfigContainer(Container):
         transformer_config = getattr(self.model, "transformer", self.model)
         if enable_in_batch_packing or enable_energon_packing:
             transformer_config._enable_in_batch_packing = True
+            # Fixed-width packs (pad_to_max_length, forced on for PP>1/EP>1) have
+            # identical p2p tensor shapes every microbatch, so the dynamic shape
+            # exchange is unnecessary — and it is not VPP-interleaved-safe (see
+            # transformer_config).
+            transformer_config._packed_shapes_static = bool(getattr(self.dataset, "pad_to_max_length", False))
             if hasattr(self.dataset, "in_batch_packing_pad_to_multiple_of"):
                 self.dataset.in_batch_packing_pad_to_multiple_of = collate_padding_multiple
         elif isinstance(

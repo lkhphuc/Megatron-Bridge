@@ -48,11 +48,16 @@ if [[ ! -e "${ENERGON_PATH}" ]]; then
   exit 1
 fi
 MBS=1
-# Energon native packing requires physical micro_batch_size=1. PP is supported
-# and verified (packs forced fixed-width; every stage pulls identical packs).
-# PP must divide NUM_GPUS. VPP is not yet supported for native packing
-# (config validation rejects it; see FALCON_MM_AGENT_NOTES/energon-packing-pp-enablement.md).
+# Energon native packing requires physical micro_batch_size=1. PP and VPP are
+# supported (packs forced fixed-width; every stage pulls identical packs; VPP
+# auto-disables batched p2p which mispairs traffic under the interleaved
+# schedule). PP must divide NUM_GPUS.
 PP=${PP:-1}
+VPP=${VPP:-}
+VPP_ARG=()
+if [[ -n "${VPP}" ]]; then
+  VPP_ARG=(model.virtual_pipeline_model_parallel_size="${VPP}")
+fi
 uv run python -m torch.distributed.run --standalone --nproc_per_node="${NUM_GPUS}" \
   scripts/training/run_recipe.py \
   --recipe "${RECIPE}" \
@@ -69,6 +74,7 @@ uv run python -m torch.distributed.run --standalone --nproc_per_node="${NUM_GPUS
   model.seq_length="${SEQ_LENGTH}" \
   model.freeze_language_model=False \
   model.pipeline_model_parallel_size="${PP}" \
+  "${VPP_ARG[@]}" \
   model.moe_token_dispatcher_type=all2all \
   dataset.path="${ENERGON_PATH}" \
   dataset.micro_batch_size="${MBS}" \
