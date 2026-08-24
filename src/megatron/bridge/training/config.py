@@ -971,6 +971,26 @@ class InProcessRestartConfig:
 
 
 # ---------------- Container config (standalone top-level config) ----------------
+def _assert_thd_capable_attention_backend(attention_backend: object) -> None:
+    """Reject attention backends that ignore packed-sequence (THD) metadata.
+
+    Args:
+        attention_backend: The configured attention backend (enum or string).
+            ``None``/``"auto"`` resolve to a THD-capable backend for VLM models.
+
+    Raises:
+        ValueError: If the backend is known to ignore ``PackedSeqParams``
+            (``local``/``unfused``), which would silently attend across packed
+            segment boundaries.
+    """
+    backend_name = str(attention_backend or "auto").split(".")[-1]
+    if backend_name in ("local", "unfused"):
+        raise ValueError(
+            "Energon native sequence packing requires a THD-capable attention backend; "
+            f"attention_backend={backend_name!r} ignores packed-sequence metadata."
+        )
+
+
 @dataclass(kw_only=True)
 class ConfigContainer(Container):
     """Top-level container holding all configuration objects."""
@@ -1339,8 +1359,16 @@ class ConfigContainer(Container):
             dist_train = getattr(self.model, "dist_train", None)
             if dist_train is not None and getattr(dist_train, "use_dist_train", False):
                 raise ValueError("Energon native sequence packing does not support Qwen3-VL DistTrain.")
-            if getattr(self.model, "pipeline_model_parallel_size", 1) > 1:
-                raise ValueError("Energon native sequence packing does not yet support pipeline parallelism.")
+            # THD packing relies on the attention stack honoring qkv_format='thd'
+            # from PackedSeqParams. Backends that ignore packed metadata would
+            # silently attend across segment boundaries, so reject them up front.
+            _assert_thd_capable_attention_backend(getattr(self.model, "attention_backend", "auto"))
+            # Pipeline parallelism is supported: packs are fixed-width via the
+            # pad_to_max_length flip below, every PP stage pulls identical packs
+            # from its own loader (pure-DP-rank sharding), and vlm_step threads
+            # packed metadata on all stages.
+            # VPP additionally requires unbatched p2p (enforced in transformer_config) because
+            # batch_isend_irecv mispairs activation/gradient traffic under the interleaved schedule. 
             self._disable_native_energon_packing_moe_overlap()
 
         if hasattr(self.dataset, "pad_to_max_length"):

@@ -486,3 +486,23 @@ def test_builder_skips_unrequested_validation(monkeypatch: pytest.MonkeyPatch):
     assert validation is None
     assert test is None
     datamodule.val_dataloader.assert_not_called()
+
+
+def test_packed_attention_backend_guard():
+    """THD packing must reject backends that ignore packed-sequence metadata."""
+    from megatron.bridge.training.config import _assert_thd_capable_attention_backend
+
+    # THD-capable (or auto-resolving) backends pass, including the enum form.
+    _assert_thd_capable_attention_backend("auto")
+    _assert_thd_capable_attention_backend("flash")
+    _assert_thd_capable_attention_backend(None)
+
+    class _FakeEnum:
+        name = "unfused"
+
+        def __str__(self) -> str:
+            return "AttnBackend.unfused"
+
+    for backend in ("local", "unfused", _FakeEnum()):
+        with pytest.raises(ValueError, match="THD-capable attention backend"):
+            _assert_thd_capable_attention_backend(backend)
