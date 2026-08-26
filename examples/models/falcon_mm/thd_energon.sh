@@ -75,7 +75,6 @@ uv run python -m torch.distributed.run --standalone --nproc_per_node="${NUM_GPUS
   model.freeze_language_model=False \
   model.pipeline_model_parallel_size="${PP}" \
   "${VPP_ARG[@]}" \
-  model.moe_token_dispatcher_type=all2all \
   dataset.path="${ENERGON_PATH}" \
   dataset.micro_batch_size="${MBS}" \
   dataset.seq_length="${SEQ_LENGTH}" \

@@ -362,6 +362,7 @@ class Qwen35VLMoEModelProvider(GPTModelProvider):
     """
 
     modality_keys: ClassVar[dict[str, str]] = {_IMAGES_MODALITY_KEY: _QWEN_VISUAL_ENCODER_KEY}
+    MODEL_CLASS: ClassVar[type[Qwen3VLModel] | None] = None
 
     # =========================================================================
     # Hybrid Architecture (Qwen3-Next style)
@@ -509,7 +510,8 @@ class Qwen35VLMoEModelProvider(GPTModelProvider):
         block_spec = self.build_language_spec(vp_stage=vp_stage)
         mtp_spec = self.build_mtp_spec(vp_stage=vp_stage)
 
-        model = Qwen3VLModel(
+        model_class = self.MODEL_CLASS or Qwen3VLModel
+        model = model_class(
             language_transformer_config=language_transformer_config,
             language_transformer_layer_spec=block_spec,
             vision_transformer_config=hf_vision_config,

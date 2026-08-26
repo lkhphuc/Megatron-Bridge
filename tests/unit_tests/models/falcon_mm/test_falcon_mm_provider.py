@@ -17,10 +17,12 @@
 from megatron.bridge.models.falcon_mm import (
     FalconMMModel,
     FalconMMModelProvider,
+    FalconMMMoEModelProvider,
     FalconPatchEmbedVisionModel,
+    falcon_mm_provider_from_qwen35_vl,
 )
 from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.model import Qwen3VLModel
-from megatron.bridge.models.qwen_vl.qwen35_vl_provider import Qwen35VLModelProvider
+from megatron.bridge.models.qwen_vl.qwen35_vl_provider import Qwen35VLModelProvider, Qwen35VLMoEModelProvider
 
 
 def _minimal_qwen35_vl_provider() -> Qwen35VLModelProvider:
@@ -40,17 +42,37 @@ def _minimal_qwen35_vl_provider() -> Qwen35VLModelProvider:
     )
 
 
+def _minimal_qwen35_vl_moe_provider() -> Qwen35VLMoEModelProvider:
+    return Qwen35VLMoEModelProvider(
+        num_layers=2,
+        hidden_size=64,
+        ffn_hidden_size=128,
+        num_attention_heads=4,
+        kv_channels=32,
+        seq_length=64,
+        vocab_size=128,
+        linear_num_key_heads=2,
+        linear_num_value_heads=2,
+        linear_key_head_dim=16,
+        linear_value_head_dim=16,
+        num_moe_experts=8,
+        moe_router_topk=2,
+        moe_ffn_hidden_size=32,
+        moe_shared_expert_intermediate_size=32,
+    )
+
+
 class TestFalconMMModelProvider:
     def test_model_class_is_falcon(self):
         provider = _minimal_qwen35_vl_provider()
         assert provider.MODEL_CLASS is None  # base resolves to Qwen3VLModel in provide()
-        falcon = FalconMMModelProvider.from_qwen35_vl_provider(provider)
+        falcon = falcon_mm_provider_from_qwen35_vl(provider)
         assert falcon.MODEL_CLASS is FalconMMModel
         assert issubclass(FalconMMModel, Qwen3VLModel)
 
-    def test_from_qwen35_vl_provider_copies_fields(self):
+    def test_falcon_mm_provider_from_qwen35_vl_copies_fields(self):
         source = _minimal_qwen35_vl_provider()
-        falcon = FalconMMModelProvider.from_qwen35_vl_provider(source)
+        falcon = falcon_mm_provider_from_qwen35_vl(source)
         assert isinstance(falcon, FalconMMModelProvider)
         for field_name in (
             "num_layers",
@@ -72,6 +94,15 @@ class TestFalconMMModelProvider:
         # GDN hybrid defaults flow through unchanged.
         assert falcon.experimental_attention_variant == "gated_delta_net"
         assert falcon.linear_attention_freq == 4
+
+    def test_falcon_mm_provider_from_qwen35_vl_moe_returns_moe_falcon(self):
+        source = _minimal_qwen35_vl_moe_provider()
+        falcon = falcon_mm_provider_from_qwen35_vl(source)
+        assert isinstance(falcon, FalconMMMoEModelProvider)
+        assert falcon.MODEL_CLASS is FalconMMModel
+        assert falcon.num_moe_experts == source.num_moe_experts
+        assert falcon.moe_router_topk == source.moe_router_topk
+        assert falcon.moe_ffn_hidden_size == source.moe_ffn_hidden_size
 
     def test_patch_embed_module_exists(self):
         assert FalconPatchEmbedVisionModel is not None

@@ -14,7 +14,11 @@
 
 """Falcon multimodal (encoder-free) model family."""
 
-from megatron.bridge.models.falcon_mm.falcon_mm_provider import FalconMMModelProvider
+from megatron.bridge.models.falcon_mm.falcon_mm_provider import (
+    FalconMMModelProvider,
+    FalconMMMoEModelProvider,
+    falcon_mm_provider_from_qwen35_vl,
+)
 from megatron.bridge.models.falcon_mm.modelling_falcon_mm import (
     FalconMMModel,
     FalconPatchEmbedVisionModel,
@@ -24,5 +28,7 @@ from megatron.bridge.models.falcon_mm.modelling_falcon_mm import (
 __all__ = [
     "FalconMMModel",
     "FalconMMModelProvider",
+    "FalconMMMoEModelProvider",
     "FalconPatchEmbedVisionModel",
+    "falcon_mm_provider_from_qwen35_vl",
 ]

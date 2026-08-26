@@ -14,21 +14,35 @@
 
 """Falcon-MM (encoder-free) recipes for H100, Energon-native THD packing only."""
 
+from dataclasses import fields
+
 import torch
 
 from megatron.bridge import AutoBridge
 from megatron.bridge.data.builders.energon import EnergonDatasetConfig
-from megatron.bridge.models.falcon_mm import FalconMMModelProvider
+from megatron.bridge.models.falcon_mm import (
+    FalconMMModelProvider,
+    FalconMMMoEModelProvider,
+    falcon_mm_provider_from_qwen35_vl,
+)
 from megatron.bridge.models.falcon_mm.data import FalconEnergonTaskEncoderConfig
 from megatron.bridge.recipes.common import _sft_common_vlm
 from megatron.bridge.recipes.utils.environment_utils import COMMON_RECIPE_ENV_VARS
 from megatron.bridge.recipes.utils.optimizer_utils import distributed_fused_adam_with_cosine_annealing
+from megatron.bridge.training.comm_overlap import CommOverlapConfig
 from megatron.bridge.training.config import ConfigContainer
 
+
+_HF_2B = "Qwen/Qwen3.5-2B"
+_HF_35B_A3B = "Qwen/Qwen3.5-35B-A3B"
 
 __all__ = [
     "falcon_mm_2b_sft_1gpu_h100_bf16_config",
     "falcon_mm_2b_sft_2gpu_h100_bf16_config",
+    "falcon_mm_2b_moe_pretrain_4gpu_h100_bf16_config",
+    "falcon_mm_2b_moe_pretrain_8gpu_h100_bf16_config",
+    "falcon_mm_35b_a3b_sft_8gpu_h100_bf16_config",
+    "falcon_mm_35b_a3b_sft_16gpu_h100_bf16_config",
 ]
 
 
@@ -48,18 +62,18 @@ def _make_falcon_energon_dataset(hf_path: str, seq_length: int, micro_batch_size
     )
 
 
-def _falcon_mm_2b_sft_base() -> ConfigContainer:
-    """Shared base for the Falcon-MM 2B (Qwen3.5-2B trunk) SFT dev recipes."""
-    cfg = _sft_common_vlm()
-
-    # Model config: Qwen3.5-2B LM trunk + encoder-free patch embed.
-    hf_path = "Qwen/Qwen3.5-2B"
-    cfg.model = FalconMMModelProvider.from_qwen35_vl_provider(
-        AutoBridge.from_hf_pretrained(hf_path).to_megatron_provider(load_weights=False)
-    )
+def _apply_falcon_energon_sft_runtime(
+    cfg: ConfigContainer,
+    *,
+    hf_path: str,
+    max_lr: float,
+    min_lr: float,
+    global_batch_size: int,
+) -> None:
+    """Apply shared Energon-packing SFT runtime knobs (dense or MoE)."""
     cfg.model.seq_length = 4096
+    cfg.checkpoint.save_interval = 100
 
-    # Parallelism settings
     cfg.model.tensor_model_parallel_size = 1
     cfg.model.pipeline_model_parallel_size = 1
     cfg.model.pipeline_dtype = None
@@ -99,7 +113,7 @@ def _falcon_mm_2b_sft_base() -> ConfigContainer:
 
     # Training config
     cfg.train.train_iters = 300000
-    cfg.train.global_batch_size = 8
+    cfg.train.global_batch_size = global_batch_size
     cfg.train.micro_batch_size = 1  # required by Energon native packing
     cfg.train.manual_gc = True
     cfg.train.manual_gc_interval = 100
@@ -111,8 +125,8 @@ def _falcon_mm_2b_sft_base() -> ConfigContainer:
     opt_cfg, scheduler_cfg = distributed_fused_adam_with_cosine_annealing(
         lr_warmup_iters=200,
         lr_decay_iters=300000,
-        max_lr=5e-6,
-        min_lr=5e-7,
+        max_lr=max_lr,
+        min_lr=min_lr,
     )
     cfg.optimizer = opt_cfg
     cfg.scheduler = scheduler_cfg
@@ -139,6 +153,54 @@ def _falcon_mm_2b_sft_base() -> ConfigContainer:
     cfg.env_vars = {
         **COMMON_RECIPE_ENV_VARS,
     }
+
+
+def _apply_falcon_moe_runtime(cfg: ConfigContainer) -> None:
+    """MoE dispatcher / EP defaults shared by Falcon-MM MoE recipes."""
+    cfg.model.pipeline_dtype = torch.bfloat16
+    cfg.model.expert_tensor_parallel_size = 1
+    cfg.model.bias_activation_fusion = True
+    cfg.model.cross_entropy_fusion_impl = "te"
+
+    cfg.model.moe_token_dispatcher_type = "alltoall"
+    cfg.model.moe_flex_dispatcher_backend = None
+    cfg.model.moe_router_fusion = True
+    cfg.model.moe_permute_fusion = True
+    cfg.model.moe_grouped_gemm = True
+    cfg.model.moe_shared_expert_overlap = False
+    cfg.model.moe_router_force_load_balancing = False
+    cfg.model.moe_router_padding_for_fp8 = False
+
+    cfg.optimizer.overlap_param_gather_with_optimizer_step = False
+
+    # Keep MoE EP overlap off until Falcon-MM packing + PP path is validated.
+    cfg.comm_overlap = CommOverlapConfig(
+        tp_comm_overlap=False,
+        overlap_grad_reduce=False,
+        overlap_param_gather=False,
+        overlap_param_gather_with_optimizer_step=False,
+        overlap_moe_expert_parallel_comm=False,
+        delay_wgrad_compute=False,
+    )
+    cfg.env_vars = {
+        **cfg.env_vars,
+        "CUDA_DEVICE_MAX_CONNECTIONS": 1,
+    }
+
+
+def _falcon_mm_2b_sft_base() -> ConfigContainer:
+    """Shared base for Falcon-MM 2B dense (Qwen3.5-2B trunk) SFT recipes."""
+    cfg = _sft_common_vlm()
+    cfg.model = falcon_mm_provider_from_qwen35_vl(
+        AutoBridge.from_hf_pretrained(_HF_2B).to_megatron_provider(load_weights=False)
+    )
+    _apply_falcon_energon_sft_runtime(
+        cfg,
+        hf_path=_HF_2B,
+        max_lr=5e-6,
+        min_lr=5e-7,
+        global_batch_size=8,
+    )
     return cfg
 
 
@@ -166,12 +228,138 @@ def falcon_mm_2b_sft_2gpu_h100_bf16_config() -> ConfigContainer:
     - LR=5e-6 (full SFT)
     - Sequence length: 4096
 
-    Requires the Energon-packing PP guard to be removed
-    (src/megatron/bridge/training/config.py — see energon-packing-pp-enablement.md).
     With PP>1, packs become fixed-width (pad_to_max_length auto-flip) and VPP
     must stay unset (Energon loader-state resume gap).
     """
     cfg = _falcon_mm_2b_sft_base()
     cfg.model.pipeline_model_parallel_size = 2
-    cfg.model.moe_token_dispatcher_type = "all2all"
+    cfg.model.moe_token_dispatcher_type = "alltoall"
+    return cfg
+
+
+def _falcon_mm_2b_moe_pretrain_base() -> ConfigContainer:
+    """2B toy MoE for single-node MoE+PP debug (from-scratch only).
+
+    Starts from the dense 2B recipe, then swaps in a Falcon MoE provider that
+    reuses the dense trunk dims with a small expert set (8 experts / top-2,
+    expert FFN = dense ``ffn_hidden_size // 4``). Override the launcher's
+    pretrained path: ``checkpoint.pretrained_checkpoint=null``.
+    """
+    cfg = _falcon_mm_2b_sft_base()
+    dense = cfg.model
+    assert isinstance(dense, FalconMMModelProvider)
+    expert_ffn = max(dense.ffn_hidden_size // 4, 128)
+    init_kwargs = {
+        field.name: getattr(dense, field.name)
+        for field in fields(FalconMMMoEModelProvider)
+        if field.init and hasattr(dense, field.name)
+    }
+    init_kwargs.update(
+        {
+            "num_moe_experts": 8,
+            "moe_router_topk": 2,
+            "moe_ffn_hidden_size": expert_ffn,
+            "moe_shared_expert_intermediate_size": expert_ffn,
+            "moe_shared_expert_gate": True,
+            "moe_grouped_gemm": True,
+            "moe_token_dispatcher_type": "alltoall",
+            "moe_permute_fusion": True,
+            "moe_router_load_balancing_type": "global_aux_loss",
+            "moe_router_pre_softmax": False,
+            "moe_aux_loss_coeff": 1e-3,
+        }
+    )
+    cfg.model = FalconMMMoEModelProvider(**init_kwargs)
+    _apply_falcon_moe_runtime(cfg)
+    cfg.model.pipeline_model_parallel_size = 2
+    cfg.model.expert_model_parallel_size = 2
+    cfg.checkpoint.pretrained_checkpoint = None
+    return cfg
+
+
+def falcon_mm_2b_moe_pretrain_4gpu_h100_bf16_config() -> ConfigContainer:
+    """Return a from-scratch MoE pretrain config for Falcon-MM 2B (toy MoE).
+
+    Default configuration: 4 GPUs
+    - TP=1, PP=2, EP=2, CP=1
+    - 8 experts / top-2 (built from dense Qwen3.5-2B dims)
+    - Energon-native THD packing, MBS=1
+    - No pretrained checkpoint (random init)
+
+    Launch example::
+
+        RECIPE=falcon_mm_2b_moe_pretrain_4gpu_h100_bf16_config NUM_GPUS=4 PP=2 \\
+          bash examples/models/falcon_mm/sft_energon.sh \\
+          checkpoint.pretrained_checkpoint=null
+    """
+    return _falcon_mm_2b_moe_pretrain_base()
+
+
+def falcon_mm_2b_moe_pretrain_8gpu_h100_bf16_config() -> ConfigContainer:
+    """Return a from-scratch MoE pretrain config for Falcon-MM 2B on 8 GPUs.
+
+    Default configuration: 8 GPUs
+    - TP=1, PP=2, EP=4, CP=1
+    - Same toy MoE as the 4-GPU recipe
+    """
+    cfg = _falcon_mm_2b_moe_pretrain_base()
+    cfg.model.expert_model_parallel_size = 4
+    cfg.train.global_batch_size = 16
+    return cfg
+
+
+def _falcon_mm_35b_a3b_sft_base() -> ConfigContainer:
+    """Falcon-MM 35B-A3B MoE SFT: shared runtime + HF MoE architecture.
+
+    Reuses the same Energon/MoE runtime helpers as the 2B MoE recipes. Model
+    dims come from ``Qwen/Qwen3.5-35B-A3B`` (cannot derive from the 2B dense
+    trunk — different hidden/expert geometry).
+    """
+    cfg = _sft_common_vlm()
+    cfg.model = falcon_mm_provider_from_qwen35_vl(
+        AutoBridge.from_hf_pretrained(_HF_35B_A3B).to_megatron_provider(load_weights=False)
+    )
+    _apply_falcon_energon_sft_runtime(
+        cfg,
+        hf_path=_HF_35B_A3B,
+        max_lr=2e-5,
+        min_lr=2e-6,
+        global_batch_size=16,
+    )
+    _apply_falcon_moe_runtime(cfg)
+
+    # Memory saving for 35B MoE full SFT on H100
+    cfg.model.recompute_granularity = "full"
+    cfg.model.recompute_method = "uniform"
+    cfg.model.recompute_num_layers = 1
+
+    cfg.model.pipeline_model_parallel_size = 2
+    cfg.model.expert_model_parallel_size = 4
+    return cfg
+
+
+def falcon_mm_35b_a3b_sft_8gpu_h100_bf16_config() -> ConfigContainer:
+    """Return an SFT config for Falcon-MM 35B-A3B MoE (Qwen3.5-35B-A3B trunk).
+
+    Default configuration: 8 GPUs
+    - TP=1, PP=2, EP=4, CP=1  (MoE + pipeline combination)
+    - Energon-native THD packing (packing_buffer_size=16), MBS=1
+    - alltoall MoE dispatcher (correctness-oriented)
+    - Sequence length: 4096
+    """
+    return _falcon_mm_35b_a3b_sft_base()
+
+
+def falcon_mm_35b_a3b_sft_16gpu_h100_bf16_config() -> ConfigContainer:
+    """Return an SFT config for Falcon-MM 35B-A3B MoE (Qwen3.5-35B-A3B trunk).
+
+    Default configuration: 16 GPUs
+    - TP=1, PP=2, EP=8, CP=1  (MoE + pipeline combination)
+    - Energon-native THD packing (packing_buffer_size=16), MBS=1
+    - alltoall MoE dispatcher (correctness-oriented)
+    - Sequence length: 4096
+    """
+    cfg = _falcon_mm_35b_a3b_sft_base()
+    cfg.model.expert_model_parallel_size = 8
+    cfg.train.global_batch_size = 32
     return cfg
