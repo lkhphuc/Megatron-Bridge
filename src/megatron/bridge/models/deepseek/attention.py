@@ -20,10 +20,28 @@ from typing import Optional
 
 from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec
 from megatron.core.transformer.identity_op import IdentityOp
-from megatron.core.transformer.mla_qk_norm_config import get_backend
 from megatron.core.transformer.multi_latent_attention import MLASelfAttention
 from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_config import TransformerConfig
+
+try:
+    from megatron.core.transformer.mla_qk_norm_config import get_backend
+except ImportError:
+    get_backend = None  # type: ignore[assignment,misc]
+
+# Main-branch MCore resolves MLA Q/KV norms through ``QKNormConfigResolver`` and
+# can fuse a query norm into ``linear_q_proj`` when ``q_lora_rank`` is None.
+# Dev MCore builds the DeepSeek-safe spec directly in ``gpt_layer_specs`` (plain
+# ``linear_q_proj``, ``q_layernorm=IdentityOp``), so the override subclass is
+# unnecessary there.
+_MLA_QK_NORM_RESOLVER_AVAILABLE = (
+    get_backend is not None and hasattr(MLASelfAttention, "_resolve_qk_norm_config")
+)
+
+
+def deepseek_mla_qnorm_override_supported() -> bool:
+    """Return whether Bridge must swap in :class:`MLASelfAttentionWithoutQueryNorm`."""
+    return _MLA_QK_NORM_RESOLVER_AVAILABLE
 
 
 class MLASelfAttentionWithoutQueryNorm(MLASelfAttention):
@@ -87,6 +105,10 @@ class MLASelfAttentionWithoutQueryNorm(MLASelfAttention):
         return layer_classes
 
 
+if not _MLA_QK_NORM_RESOLVER_AVAILABLE:
+    MLASelfAttentionWithoutQueryNorm = MLASelfAttention  # type: ignore[assignment,misc]
+
+
 def get_deepseek_decoder_block_spec(
     config: TransformerConfig,
     use_transformer_engine: bool,
@@ -136,7 +158,7 @@ def replace_mla_self_attention(config: TransformerConfig, spec: ModuleSpec) -> M
 
     Accepts either a block spec (``.layer_specs``) or a single layer spec.
     """
-    if getattr(config, "q_lora_rank", None) is not None:
+    if getattr(config, "q_lora_rank", None) is not None or not _MLA_QK_NORM_RESOLVER_AVAILABLE:
         return spec
 
     layer_specs = getattr(spec, "layer_specs", None)

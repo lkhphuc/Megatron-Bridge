@@ -31,6 +31,7 @@ from megatron.bridge.models.conversion.model_bridge import MegatronModelBridge
 from megatron.bridge.models.deepseek import attention as attention_module
 from megatron.bridge.models.deepseek.attention import (
     MLASelfAttentionWithoutQueryNorm,
+    deepseek_mla_qnorm_override_supported,
     get_deepseek_decoder_block_spec,
     replace_mla_self_attention,
 )
@@ -67,6 +68,8 @@ def _module_name(module_or_spec):
 
 
 def _resolve(q_lora_rank):
+    if not deepseek_mla_qnorm_override_supported():
+        pytest.skip("MCore dev builds DeepSeek-safe MLA specs without QKNormConfigResolver")
     # `_resolve_qk_norm_config` only reads `self.config`, so bypass __init__ (which would
     # need process groups) but keep a real instance so its zero-arg `super()` resolves.
     attention = MLASelfAttentionWithoutQueryNorm.__new__(MLASelfAttentionWithoutQueryNorm)
@@ -197,6 +200,8 @@ class TestLocalBackend:
         as `RuntimeError: qk_layernorm requires TransformerEngine ...` from deep inside the
         resolver, which does not say which model setting is at fault.
         """
+        if not deepseek_mla_qnorm_override_supported():
+            pytest.skip("MCore dev builds DeepSeek-safe MLA specs without QKNormConfigResolver")
         attention = MLASelfAttentionWithoutQueryNorm.__new__(MLASelfAttentionWithoutQueryNorm)
         config = _config(q_lora_rank=None)
         config.transformer_impl = "local"
@@ -207,6 +212,8 @@ class TestLocalBackend:
 
     def test_local_spec_with_a_query_lora_is_untouched(self):
         """The query-LoRA path must resolve exactly as it did before."""
+        if not deepseek_mla_qnorm_override_supported():
+            pytest.skip("MCore dev builds DeepSeek-safe MLA specs without QKNormConfigResolver")
         attention = MLASelfAttentionWithoutQueryNorm.__new__(MLASelfAttentionWithoutQueryNorm)
         config = _config(q_lora_rank=1536)
         config.transformer_impl = "local"
@@ -229,7 +236,12 @@ class TestStandaloneMTPStage:
 
         replace_mla_self_attention(_config(q_lora_rank=None), layer_spec)
 
-        assert layer_spec.submodules.self_attention.module is MLASelfAttentionWithoutQueryNorm
+        expected_module = (
+            MLASelfAttentionWithoutQueryNorm
+            if deepseek_mla_qnorm_override_supported()
+            else MLASelfAttention
+        )
+        assert layer_spec.submodules.self_attention.module is expected_module
 
     def test_transform_leaves_the_query_lora_path_alone(self):
         """With a query LoRA the stock attention is correct and must stay."""
