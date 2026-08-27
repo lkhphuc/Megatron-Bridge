@@ -21,9 +21,9 @@ import torch
 from megatron.bridge import AutoBridge
 from megatron.bridge.data.builders.energon import EnergonDatasetConfig
 from megatron.bridge.models.falcon_mm import (
-    FalconMMModelProvider,
-    FalconMMMoEModelProvider,
-    falcon_mm_provider_from_qwen35_vl,
+    FalconQwen35ModelProvider,
+    FalconQwen35MoEModelProvider,
+    falcon_qwen35_provider_from_qwen35_vl,
 )
 from megatron.bridge.models.falcon_mm.data import FalconEnergonTaskEncoderConfig
 from megatron.bridge.recipes.common import _sft_common_vlm
@@ -37,12 +37,12 @@ _HF_2B = "Qwen/Qwen3.5-2B"
 _HF_35B_A3B = "Qwen/Qwen3.5-35B-A3B"
 
 __all__ = [
-    "falcon_mm_2b_sft_1gpu_h100_bf16_config",
-    "falcon_mm_2b_sft_2gpu_h100_bf16_config",
-    "falcon_mm_2b_moe_pretrain_4gpu_h100_bf16_config",
-    "falcon_mm_2b_moe_pretrain_8gpu_h100_bf16_config",
-    "falcon_mm_35b_a3b_sft_8gpu_h100_bf16_config",
-    "falcon_mm_35b_a3b_sft_16gpu_h100_bf16_config",
+    "falcon_qwen35_2b_sft_1gpu_h100_bf16_config",
+    "falcon_qwen35_2b_sft_2gpu_h100_bf16_config",
+    "falcon_qwen35_2b_moe_pretrain_4gpu_h100_bf16_config",
+    "falcon_qwen35_2b_moe_pretrain_8gpu_h100_bf16_config",
+    "falcon_qwen35_35b_a3b_sft_8gpu_h100_bf16_config",
+    "falcon_qwen35_35b_a3b_sft_16gpu_h100_bf16_config",
 ]
 
 
@@ -188,10 +188,10 @@ def _apply_falcon_moe_runtime(cfg: ConfigContainer) -> None:
     }
 
 
-def _falcon_mm_2b_sft_base() -> ConfigContainer:
+def _falcon_qwen35_2b_sft_base() -> ConfigContainer:
     """Shared base for Falcon-MM 2B dense (Qwen3.5-2B trunk) SFT recipes."""
     cfg = _sft_common_vlm()
-    cfg.model = falcon_mm_provider_from_qwen35_vl(
+    cfg.model = falcon_qwen35_provider_from_qwen35_vl(
         AutoBridge.from_hf_pretrained(_HF_2B).to_megatron_provider(load_weights=False)
     )
     _apply_falcon_energon_sft_runtime(
@@ -204,7 +204,7 @@ def _falcon_mm_2b_sft_base() -> ConfigContainer:
     return cfg
 
 
-def falcon_mm_2b_sft_1gpu_h100_bf16_config() -> ConfigContainer:
+def falcon_qwen35_2b_sft_1gpu_h100_bf16_config() -> ConfigContainer:
     """Return an SFT dev config for Falcon-MM 2B (encoder-free, Qwen3.5-2B trunk).
 
     Default configuration: 1 GPU
@@ -216,10 +216,10 @@ def falcon_mm_2b_sft_1gpu_h100_bf16_config() -> ConfigContainer:
     This is the PP=1 baseline for the PP loss-parity sentinel
     (energon-packing-pp-enablement.md, step 2).
     """
-    return _falcon_mm_2b_sft_base()
+    return _falcon_qwen35_2b_sft_base()
 
 
-def falcon_mm_2b_sft_2gpu_h100_bf16_config() -> ConfigContainer:
+def falcon_qwen35_2b_sft_2gpu_h100_bf16_config() -> ConfigContainer:
     """Return an SFT dev config for Falcon-MM 2B (encoder-free, Qwen3.5-2B trunk).
 
     Default configuration: 2 GPU
@@ -231,13 +231,13 @@ def falcon_mm_2b_sft_2gpu_h100_bf16_config() -> ConfigContainer:
     With PP>1, packs become fixed-width (pad_to_max_length auto-flip) and VPP
     must stay unset (Energon loader-state resume gap).
     """
-    cfg = _falcon_mm_2b_sft_base()
+    cfg = _falcon_qwen35_2b_sft_base()
     cfg.model.pipeline_model_parallel_size = 2
     cfg.model.moe_token_dispatcher_type = "alltoall"
     return cfg
 
 
-def _falcon_mm_2b_moe_pretrain_base() -> ConfigContainer:
+def _falcon_qwen35_2b_moe_pretrain_base() -> ConfigContainer:
     """2B toy MoE for single-node MoE+PP debug (from-scratch only).
 
     Starts from the dense 2B recipe, then swaps in a Falcon MoE provider that
@@ -245,13 +245,13 @@ def _falcon_mm_2b_moe_pretrain_base() -> ConfigContainer:
     expert FFN = dense ``ffn_hidden_size // 4``). Override the launcher's
     pretrained path: ``checkpoint.pretrained_checkpoint=null``.
     """
-    cfg = _falcon_mm_2b_sft_base()
+    cfg = _falcon_qwen35_2b_sft_base()
     dense = cfg.model
-    assert isinstance(dense, FalconMMModelProvider)
+    assert isinstance(dense, FalconQwen35ModelProvider)
     expert_ffn = max(dense.ffn_hidden_size // 4, 128)
     init_kwargs = {
         field.name: getattr(dense, field.name)
-        for field in fields(FalconMMMoEModelProvider)
+        for field in fields(FalconQwen35MoEModelProvider)
         if field.init and hasattr(dense, field.name)
     }
     init_kwargs.update(
@@ -269,7 +269,7 @@ def _falcon_mm_2b_moe_pretrain_base() -> ConfigContainer:
             "moe_aux_loss_coeff": 1e-3,
         }
     )
-    cfg.model = FalconMMMoEModelProvider(**init_kwargs)
+    cfg.model = FalconQwen35MoEModelProvider(**init_kwargs)
     _apply_falcon_moe_runtime(cfg)
     cfg.model.pipeline_model_parallel_size = 2
     cfg.model.expert_model_parallel_size = 2
@@ -277,7 +277,7 @@ def _falcon_mm_2b_moe_pretrain_base() -> ConfigContainer:
     return cfg
 
 
-def falcon_mm_2b_moe_pretrain_4gpu_h100_bf16_config() -> ConfigContainer:
+def falcon_qwen35_2b_moe_pretrain_4gpu_h100_bf16_config() -> ConfigContainer:
     """Return a from-scratch MoE pretrain config for Falcon-MM 2B (toy MoE).
 
     Default configuration: 4 GPUs
@@ -288,27 +288,27 @@ def falcon_mm_2b_moe_pretrain_4gpu_h100_bf16_config() -> ConfigContainer:
 
     Launch example::
 
-        RECIPE=falcon_mm_2b_moe_pretrain_4gpu_h100_bf16_config NUM_GPUS=4 PP=2 \\
+        RECIPE=falcon_qwen35_2b_moe_pretrain_4gpu_h100_bf16_config NUM_GPUS=4 PP=2 \\
           bash examples/models/falcon_mm/sft_energon.sh \\
           checkpoint.pretrained_checkpoint=null
     """
-    return _falcon_mm_2b_moe_pretrain_base()
+    return _falcon_qwen35_2b_moe_pretrain_base()
 
 
-def falcon_mm_2b_moe_pretrain_8gpu_h100_bf16_config() -> ConfigContainer:
+def falcon_qwen35_2b_moe_pretrain_8gpu_h100_bf16_config() -> ConfigContainer:
     """Return a from-scratch MoE pretrain config for Falcon-MM 2B on 8 GPUs.
 
     Default configuration: 8 GPUs
     - TP=1, PP=2, EP=4, CP=1
     - Same toy MoE as the 4-GPU recipe
     """
-    cfg = _falcon_mm_2b_moe_pretrain_base()
+    cfg = _falcon_qwen35_2b_moe_pretrain_base()
     cfg.model.expert_model_parallel_size = 4
     cfg.train.global_batch_size = 16
     return cfg
 
 
-def _falcon_mm_35b_a3b_sft_base() -> ConfigContainer:
+def _falcon_qwen35_35b_a3b_sft_base() -> ConfigContainer:
     """Falcon-MM 35B-A3B MoE SFT: shared runtime + HF MoE architecture.
 
     Reuses the same Energon/MoE runtime helpers as the 2B MoE recipes. Model
@@ -316,7 +316,7 @@ def _falcon_mm_35b_a3b_sft_base() -> ConfigContainer:
     trunk — different hidden/expert geometry).
     """
     cfg = _sft_common_vlm()
-    cfg.model = falcon_mm_provider_from_qwen35_vl(
+    cfg.model = falcon_qwen35_provider_from_qwen35_vl(
         AutoBridge.from_hf_pretrained(_HF_35B_A3B).to_megatron_provider(load_weights=False)
     )
     _apply_falcon_energon_sft_runtime(
@@ -338,7 +338,7 @@ def _falcon_mm_35b_a3b_sft_base() -> ConfigContainer:
     return cfg
 
 
-def falcon_mm_35b_a3b_sft_8gpu_h100_bf16_config() -> ConfigContainer:
+def falcon_qwen35_35b_a3b_sft_8gpu_h100_bf16_config() -> ConfigContainer:
     """Return an SFT config for Falcon-MM 35B-A3B MoE (Qwen3.5-35B-A3B trunk).
 
     Default configuration: 8 GPUs
@@ -347,10 +347,10 @@ def falcon_mm_35b_a3b_sft_8gpu_h100_bf16_config() -> ConfigContainer:
     - alltoall MoE dispatcher (correctness-oriented)
     - Sequence length: 4096
     """
-    return _falcon_mm_35b_a3b_sft_base()
+    return _falcon_qwen35_35b_a3b_sft_base()
 
 
-def falcon_mm_35b_a3b_sft_16gpu_h100_bf16_config() -> ConfigContainer:
+def falcon_qwen35_35b_a3b_sft_16gpu_h100_bf16_config() -> ConfigContainer:
     """Return an SFT config for Falcon-MM 35B-A3B MoE (Qwen3.5-35B-A3B trunk).
 
     Default configuration: 16 GPUs
@@ -359,7 +359,7 @@ def falcon_mm_35b_a3b_sft_16gpu_h100_bf16_config() -> ConfigContainer:
     - alltoall MoE dispatcher (correctness-oriented)
     - Sequence length: 4096
     """
-    cfg = _falcon_mm_35b_a3b_sft_base()
+    cfg = _falcon_qwen35_35b_a3b_sft_base()
     cfg.model.expert_model_parallel_size = 8
     cfg.train.global_batch_size = 32
     return cfg

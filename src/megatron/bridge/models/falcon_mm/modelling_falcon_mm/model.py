@@ -120,7 +120,7 @@ class FalconPatchEmbedVisionModel(MegatronModule):
         return hidden_states, []
 
 
-class FalconMMModel(Qwen3VLModel):
+class FalconQwen35Model(Qwen3VLModel):
     """Encoder-free multimodal model: Qwen3-VL LM trunk + patch embed.
 
     Constructed exactly like :class:`Qwen3VLModel` except the ViT vision tower

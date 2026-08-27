@@ -26,8 +26,13 @@ from PIL import Image
 from megatron.bridge.data.builders.energon import QwenVLEnergonTaskEncoderConfig
 from megatron.bridge.data.datasets.utils import IGNORE_INDEX
 from megatron.bridge.models.falcon_mm.data import (
+    FalconDeepseekv4TaskEncoder,
     FalconEnergonTaskEncoderConfig,
     FalconTaskEncoder,
+)
+from megatron.bridge.models.falcon_mm.data.deepseek_v4_processor import (
+    FALCON_DS_IMAGE_TOKEN,
+    FalconDeepseekv4Processor,
 )
 from megatron.bridge.models.falcon_mm.data.energon import FALCON_IMAGE_MARKER
 from megatron.bridge.models.falcon_mm.data.mint_webdataset import (
@@ -278,3 +283,159 @@ class TestFalconTaskEncoderDocumentPath:
         encoded = encoder.encode_sample(sample)
 
         assert isinstance(encoded, QwenVLTaskSample)
+
+
+def _make_ds_tokenizer(*, with_placeholder: bool = True):
+    from tokenizers import Tokenizer
+    from tokenizers.models import WordLevel
+    from tokenizers.pre_tokenizers import Whitespace
+    from transformers import PreTrainedTokenizerFast
+
+    vocab = {"<unk>": 0, "hello": 1, "world": 2, "cap": 3, "tail": 4, "plain": 5, "doc": 6}
+    if with_placeholder:
+        vocab[FALCON_DS_IMAGE_TOKEN] = 7
+    backend = Tokenizer(WordLevel(vocab, unk_token="<unk>"))
+    backend.pre_tokenizer = Whitespace()
+    return PreTrainedTokenizerFast(
+        tokenizer_object=backend,
+        unk_token="<unk>",
+        pad_token="<unk>",
+        eos_token="<unk>",
+    )
+
+
+def _make_qwen_image_processor():
+    from transformers import Qwen2VLImageProcessor
+
+    return Qwen2VLImageProcessor(
+        size={"shortest_edge": 56, "longest_edge": 280},
+        patch_size=14,
+        temporal_patch_size=2,
+        merge_size=2,
+    )
+
+
+def _make_ds_processor(*, with_placeholder: bool = True, spatial_merge_size: int = 2):
+    tokenizer = _make_ds_tokenizer(with_placeholder=with_placeholder)
+    image_processor = _make_qwen_image_processor()
+    return (
+        FalconDeepseekv4Processor(
+            tokenizer,
+            image_processor,
+            spatial_merge_size=spatial_merge_size,
+        ),
+        tokenizer,
+        image_processor,
+    )
+
+
+class TestFalconDeepseekv4Processor:
+    def test_text_only_document(self):
+        processor, tokenizer, _ = _make_ds_processor()
+        text = "hello world"
+
+        result = processor(text=[text], padding=False, return_tensors="pt")
+
+        expected = tokenizer(text, add_special_tokens=False, return_tensors="pt")["input_ids"]
+        assert torch.equal(result["input_ids"], expected)
+        assert "pixel_values" not in result
+        assert "image_grid_thw" not in result
+
+    def test_one_image_expands_placeholder_span(self):
+        processor, tokenizer, image_processor = _make_ds_processor()
+        image = Image.new("RGB", (28, 28), "red")
+        document = f"hello\n{FALCON_IMAGE_MARKER}\nworld"
+
+        result = processor(text=[document], images=[image], return_tensors="pt")
+
+        visual = image_processor(images=[image], return_tensors="pt")
+        grid = visual["image_grid_thw"][0]
+        expected_span = int(grid.prod().item()) // 4
+        ids = result["input_ids"][0].tolist()
+        hello_id = tokenizer.convert_tokens_to_ids("hello")
+        world_id = tokenizer.convert_tokens_to_ids("world")
+        placeholder_id = tokenizer.convert_tokens_to_ids(FALCON_DS_IMAGE_TOKEN)
+        assert ids == [hello_id] + [placeholder_id] * expected_span + [world_id]
+        assert result["pixel_values"].shape == visual["pixel_values"].shape
+        assert torch.equal(result["image_grid_thw"], visual["image_grid_thw"])
+
+    def test_two_images_in_document_order(self):
+        processor, tokenizer, image_processor = _make_ds_processor()
+        images = [Image.new("RGB", (28, 28), "red"), Image.new("RGB", (56, 28), "blue")]
+        document = f"hello\n{FALCON_IMAGE_MARKER}\ncap\n{FALCON_IMAGE_MARKER}\ntail"
+
+        result = processor(text=[document], images=images, return_tensors="pt")
+
+        grids = image_processor(images=images, return_tensors="pt")["image_grid_thw"]
+        span_lengths = [int(grids[i].prod().item()) // 4 for i in range(2)]
+        ids = result["input_ids"][0].tolist()
+        placeholder_id = tokenizer.convert_tokens_to_ids(FALCON_DS_IMAGE_TOKEN)
+        hello_id = tokenizer.convert_tokens_to_ids("hello")
+        cap_id = tokenizer.convert_tokens_to_ids("cap")
+        tail_id = tokenizer.convert_tokens_to_ids("tail")
+        expected = (
+            [hello_id] + [placeholder_id] * span_lengths[0] + [cap_id] + [placeholder_id] * span_lengths[1] + [tail_id]
+        )
+        assert ids == expected
+
+    def test_marker_image_count_mismatch_raises(self):
+        processor, _, _ = _make_ds_processor()
+        document = f"hello\n{FALCON_IMAGE_MARKER}\nworld"
+
+        with pytest.raises(ValueError, match="image marker"):
+            processor(text=[document], images=[])
+
+    def test_missing_placeholder_token_raises(self):
+        with pytest.raises(ValueError, match=FALCON_DS_IMAGE_TOKEN):
+            _make_ds_processor(with_placeholder=False)
+
+
+class TestFalconDeepseekv4TaskEncoder:
+    def _make_encoder(self, **kwargs):
+        processor, tokenizer, _ = _make_ds_processor()
+        kwargs.setdefault("max_padding_length", 2048)
+        kwargs.setdefault("patch_size", 14)
+        kwargs.setdefault("spatial_merge_size", 2)
+        return FalconDeepseekv4TaskEncoder(
+            tokenizer=tokenizer,
+            image_processor=processor,
+            **kwargs,
+        ), processor
+
+    def test_skipped_token_ids_includes_placeholder(self):
+        encoder, processor = self._make_encoder()
+        skipped = encoder._skipped_token_ids(processor)
+        assert processor.image_token_id in skipped.tolist()
+
+    def test_encode_interleaved_sample(self):
+        encoder, processor = self._make_encoder()
+        image_tensors = [torch.rand(3, 8, 8), torch.rand(3, 8, 8)]
+        sample = InterleavedSample(
+            __key__="shard/0",
+            __restore_key__=("shard", 0),
+            __subflavors__={},
+            sequence=[
+                "Hello",
+                image_tensors[0],
+                "cap0",
+                "world",
+                "tail",
+                image_tensors[1],
+                "cap1",
+            ],
+        )
+
+        encoded = encoder.encode_sample(sample)
+
+        assert isinstance(encoded, QwenVLTaskSample)
+        assert encoded.example is None
+        prepared = encoded.prepared_sequence
+        assert prepared is not None
+        assert prepared.visual_values
+        labels = prepared.row["labels"].tolist()
+        loss_mask = prepared.row["loss_mask"]
+        placeholder_id = processor.image_token_id
+        assert labels.count(IGNORE_INDEX) >= 2
+        assert all(mask == 0.0 for label, mask in zip(labels, loss_mask.tolist()) if label == IGNORE_INDEX)
+        assert any(token_id == placeholder_id for token_id in prepared.row["input_ids"].tolist())
+        assert loss_mask[-1] == 0

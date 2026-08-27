@@ -15,11 +15,11 @@
 """Unit tests for the Falcon-MM provider (encoder-free Qwen3.5 trunk)."""
 
 from megatron.bridge.models.falcon_mm import (
-    FalconMMModel,
-    FalconMMModelProvider,
-    FalconMMMoEModelProvider,
     FalconPatchEmbedVisionModel,
-    falcon_mm_provider_from_qwen35_vl,
+    FalconQwen35Model,
+    FalconQwen35ModelProvider,
+    FalconQwen35MoEModelProvider,
+    falcon_qwen35_provider_from_qwen35_vl,
 )
 from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.model import Qwen3VLModel
 from megatron.bridge.models.qwen_vl.qwen35_vl_provider import Qwen35VLModelProvider, Qwen35VLMoEModelProvider
@@ -62,18 +62,18 @@ def _minimal_qwen35_vl_moe_provider() -> Qwen35VLMoEModelProvider:
     )
 
 
-class TestFalconMMModelProvider:
+class TestFalconQwen35ModelProvider:
     def test_model_class_is_falcon(self):
         provider = _minimal_qwen35_vl_provider()
         assert provider.MODEL_CLASS is None  # base resolves to Qwen3VLModel in provide()
-        falcon = falcon_mm_provider_from_qwen35_vl(provider)
-        assert falcon.MODEL_CLASS is FalconMMModel
-        assert issubclass(FalconMMModel, Qwen3VLModel)
+        falcon = falcon_qwen35_provider_from_qwen35_vl(provider)
+        assert falcon.MODEL_CLASS is FalconQwen35Model
+        assert issubclass(FalconQwen35Model, Qwen3VLModel)
 
-    def test_falcon_mm_provider_from_qwen35_vl_copies_fields(self):
+    def test_falcon_qwen35_provider_from_qwen35_vl_copies_fields(self):
         source = _minimal_qwen35_vl_provider()
-        falcon = falcon_mm_provider_from_qwen35_vl(source)
-        assert isinstance(falcon, FalconMMModelProvider)
+        falcon = falcon_qwen35_provider_from_qwen35_vl(source)
+        assert isinstance(falcon, FalconQwen35ModelProvider)
         for field_name in (
             "num_layers",
             "hidden_size",
@@ -95,11 +95,11 @@ class TestFalconMMModelProvider:
         assert falcon.experimental_attention_variant == "gated_delta_net"
         assert falcon.linear_attention_freq == 4
 
-    def test_falcon_mm_provider_from_qwen35_vl_moe_returns_moe_falcon(self):
+    def test_falcon_qwen35_provider_from_qwen35_vl_moe_returns_moe_falcon(self):
         source = _minimal_qwen35_vl_moe_provider()
-        falcon = falcon_mm_provider_from_qwen35_vl(source)
-        assert isinstance(falcon, FalconMMMoEModelProvider)
-        assert falcon.MODEL_CLASS is FalconMMModel
+        falcon = falcon_qwen35_provider_from_qwen35_vl(source)
+        assert isinstance(falcon, FalconQwen35MoEModelProvider)
+        assert falcon.MODEL_CLASS is FalconQwen35Model
         assert falcon.num_moe_experts == source.num_moe_experts
         assert falcon.moe_router_topk == source.moe_router_topk
         assert falcon.moe_ffn_hidden_size == source.moe_ffn_hidden_size

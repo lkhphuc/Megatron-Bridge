@@ -14,21 +14,35 @@
 
 """Falcon multimodal (encoder-free) model family."""
 
-from megatron.bridge.models.falcon_mm.falcon_mm_provider import (
-    FalconMMModelProvider,
-    FalconMMMoEModelProvider,
-    falcon_mm_provider_from_qwen35_vl,
+from megatron.bridge.models.falcon_mm.falcon_deepseekv4_bridge import (
+    FalconDeepseekv4Bridge,
+)
+from megatron.bridge.models.falcon_mm.falcon_deepseekv4_pattern import (
+    falcon_deepseekv4_layer_pattern,
+)
+from megatron.bridge.models.falcon_mm.falcon_deepseekv4_provider import (
+    FalconDeepseekv4ModelProvider,
+)
+from megatron.bridge.models.falcon_mm.falcon_qwen35_provider import (
+    FalconQwen35ModelProvider,
+    FalconQwen35MoEModelProvider,
+    falcon_qwen35_provider_from_qwen35_vl,
 )
 from megatron.bridge.models.falcon_mm.modelling_falcon_mm import (
-    FalconMMModel,
+    FalconDeepseekv4Model,
     FalconPatchEmbedVisionModel,
+    FalconQwen35Model,
 )
 
 
 __all__ = [
-    "FalconMMModel",
-    "FalconMMModelProvider",
-    "FalconMMMoEModelProvider",
+    "FalconDeepseekv4Bridge",
+    "FalconDeepseekv4Model",
+    "FalconDeepseekv4ModelProvider",
     "FalconPatchEmbedVisionModel",
-    "falcon_mm_provider_from_qwen35_vl",
+    "FalconQwen35Model",
+    "FalconQwen35ModelProvider",
+    "FalconQwen35MoEModelProvider",
+    "falcon_deepseekv4_layer_pattern",
+    "falcon_qwen35_provider_from_qwen35_vl",
 ]

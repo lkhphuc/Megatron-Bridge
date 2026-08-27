@@ -60,6 +60,13 @@ from megatron.energon.flavors.interleaved import InterleavedSample
 from megatron.energon.task_encoder.cooking import Cooker
 
 from megatron.bridge.data.builders.energon import QwenVLEnergonTaskEncoderConfig
+from megatron.bridge.models.falcon_mm.data.deepseek_v4_processor import FalconDeepseekv4Processor
+
+
+try:
+    from transformers import Qwen3VLImageProcessor as _QwenVLImageProcessor
+except ImportError:  # pragma: no cover - pinned transformers may only expose Qwen2VL
+    from transformers import Qwen2VLImageProcessor as _QwenVLImageProcessor
 
 
 if TYPE_CHECKING:
@@ -128,6 +135,70 @@ class FalconEnergonTaskEncoderConfig(QwenVLEnergonTaskEncoderConfig):
         return FalconTaskEncoder(
             tokenizer=tokenizer,
             image_processor=image_processor,
+            **self._task_encoder_kwargs(
+                config,
+                effective_packing=effective_packing,
+                enable_energon_packing=enable_energon_packing,
+            ),
+        )
+
+
+@dataclass(kw_only=True)
+class FalconDeepseekv4EnergonTaskEncoderConfig(FalconEnergonTaskEncoderConfig):
+    """Serializable settings for the Falcon-MM DSv4 Energon task encoder.
+
+    The patch geometry fields must match the model provider's patch embed
+    (defaults mirror ``FalconDeepseekv4ModelProvider``). A mismatch between
+    the image processor's ``patch_size`` and the Conv3d patchify kernel
+    changes the visual token count per image and breaks the placeholder-span
+    contract.
+    """
+
+    # ``hf_processor_path`` is required non-empty by the parent config but
+    # unused by the DSv4 builder (the DSv4 path loads its own tokenizer and
+    # image processor). Default it to the DSv4 HF repo id.
+    hf_processor_path: str = "deepseek-ai/DeepSeek-V4-Flash"
+    ds_tokenizer_path: str = ""
+    image_processor_path: str | None = None
+    spatial_merge_size: int = 2
+    patch_size: int = 16
+    temporal_patch_size: int = 2
+
+    def build_task_encoder(
+        self,
+        config: "EnergonDatasetConfig",
+        *,
+        effective_packing: bool,
+        enable_energon_packing: bool,
+        trust_remote_code: bool,
+    ) -> Any:
+        """Construct the Falcon-MM DSv4 task encoder at runtime."""
+        from transformers import AutoTokenizer
+
+        if not self.ds_tokenizer_path.strip():
+            raise ValueError("ds_tokenizer_path must be a non-empty string.")
+
+        tokenizer = AutoTokenizer.from_pretrained(
+            self.ds_tokenizer_path,
+            trust_remote_code=trust_remote_code,
+        )
+        if self.image_processor_path:
+            image_processor = _QwenVLImageProcessor.from_pretrained(self.image_processor_path)
+        else:
+            image_processor = _QwenVLImageProcessor()
+        # Force the patch geometry to match the model's patch embed. These
+        # are plain attributes consumed by the image processor's preprocess.
+        image_processor.patch_size = self.patch_size
+        image_processor.temporal_patch_size = self.temporal_patch_size
+        image_processor.merge_size = self.spatial_merge_size
+        processor = FalconDeepseekv4Processor(
+            tokenizer,
+            image_processor,
+            spatial_merge_size=self.spatial_merge_size,
+        )
+        return FalconDeepseekv4TaskEncoder(
+            tokenizer=tokenizer,
+            image_processor=processor,
             **self._task_encoder_kwargs(
                 config,
                 effective_packing=effective_packing,
@@ -263,6 +334,10 @@ class FalconTaskEncoder(QwenVLTaskEncoder):
             prepared_sequence=prepared_sequence,
         )
 
+    def _skipped_token_ids(self, processor: Any) -> torch.Tensor:
+        """Return label-mask token ids for the given processor."""
+        return extract_skipped_token_ids(processor)
+
     def _prepare_falcon_document_sequence(self, text: str, images: list[Any]) -> QwenVLPreparedSequence:
         """Process one document into the exact row consumed by THD packing.
 
@@ -275,7 +350,7 @@ class FalconTaskEncoder(QwenVLTaskEncoder):
         the per-token ``num_tokens`` denominator.
         """
         processor = self.image_processor
-        skipped_tokens = extract_skipped_token_ids(processor)
+        skipped_tokens = self._skipped_token_ids(processor)
         processor_kwargs: dict[str, Any] = {
             "text": [text],
             "padding": False,
@@ -335,3 +410,15 @@ class FalconTaskEncoder(QwenVLTaskEncoder):
             },
             visual_values=visual_values,
         )
+
+
+class FalconDeepseekv4TaskEncoder(FalconTaskEncoder):
+    """Falcon-MM task encoder wired to the DeepSeek-V4 processor shim."""
+
+    def _skipped_token_ids(self, processor: Any) -> torch.Tensor:
+        """Mask DSv4 placeholder ids in addition to the base skipped tokens."""
+        base = super()._skipped_token_ids(processor)
+        placeholder = torch.tensor([processor.image_token_id], dtype=torch.int)
+        if base.numel() == 0:
+            return placeholder
+        return torch.unique(torch.cat([base, placeholder]))

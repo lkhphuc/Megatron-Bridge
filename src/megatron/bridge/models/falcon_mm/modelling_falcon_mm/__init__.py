@@ -12,18 +12,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Encoder-free Falcon multimodal model.
+"""Encoder-free Falcon multimodal models.
 
-The model reuses :class:`Qwen3VLModel` wholesale — placeholder-span scatter,
-MRoPE x THD x CP, per-stage packed metadata handling — and replaces only the
-vision tower with an encoder-free patch embed (Conv3d patchify + hMLP merger).
-See ``natively-multimodal-300b-feasibility.md`` (D1) for the design.
+Two trunk variants share the encoder-free patch embed (Conv3d patchify +
+hMLP merger) and the placeholder-span scatter contract:
+
+- :class:`FalconQwen35Model` reuses :class:`Qwen3VLModel` wholesale —
+  placeholder-span scatter, MRoPE x THD x CP, per-stage packed metadata
+  handling — and replaces only the vision tower with the patch embed.
+- :class:`FalconDeepseekv4Model` composes the patch embed with a
+  Megatron-Core ``HybridModel`` DSv4 trunk, following the Nemotron Omni
+  wrapper pattern.
 """
 
 from megatron.bridge.models.falcon_mm.modelling_falcon_mm.model import (
-    FalconMMModel,
     FalconPatchEmbedVisionModel,
+    FalconQwen35Model,
+)
+from megatron.bridge.models.falcon_mm.modelling_falcon_mm.model_deepseekv4 import (
+    FalconDeepseekv4Model,
 )
 
 
-__all__ = ["FalconMMModel", "FalconPatchEmbedVisionModel"]
+__all__ = ["FalconDeepseekv4Model", "FalconPatchEmbedVisionModel", "FalconQwen35Model"]

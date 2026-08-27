@@ -13,9 +13,16 @@
 # limitations under the License.
 
 from megatron.bridge.models.falcon_mm.data.energon import (
+    FalconDeepseekv4EnergonTaskEncoderConfig,
+    FalconDeepseekv4TaskEncoder,
     FalconEnergonTaskEncoderConfig,
     FalconTaskEncoder,
 )
 
 
-__all__ = ["FalconEnergonTaskEncoderConfig", "FalconTaskEncoder"]
+__all__ = [
+    "FalconDeepseekv4EnergonTaskEncoderConfig",
+    "FalconDeepseekv4TaskEncoder",
+    "FalconEnergonTaskEncoderConfig",
+    "FalconTaskEncoder",
+]

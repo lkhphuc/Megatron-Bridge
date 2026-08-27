@@ -17,10 +17,10 @@
 import pytest
 
 from megatron.bridge.data.builders.energon import EnergonDatasetConfig
-from megatron.bridge.models.falcon_mm import FalconMMModel, FalconMMModelProvider, FalconMMMoEModelProvider
+from megatron.bridge.models.falcon_mm import FalconQwen35Model, FalconQwen35ModelProvider, FalconQwen35MoEModelProvider
 from megatron.bridge.models.falcon_mm.data import FalconEnergonTaskEncoderConfig
 from megatron.bridge.models.qwen_vl.qwen35_vl_provider import Qwen35VLModelProvider, Qwen35VLMoEModelProvider
-from megatron.bridge.recipes.falcon_mm.h100 import falcon_mm as recipe_module
+from megatron.bridge.recipes.falcon_mm.h100 import falcon_qwen35 as recipe_module
 from megatron.bridge.training.config import ConfigContainer
 
 
@@ -85,8 +85,8 @@ def _patch_autobridge(monkeypatch: pytest.MonkeyPatch):
 def _assert_energon_packing_contract(cfg: ConfigContainer) -> None:
     """The invariants Energon-native packing requires (config.py validation)."""
     assert isinstance(cfg, ConfigContainer)
-    assert isinstance(cfg.model, (FalconMMModelProvider, FalconMMMoEModelProvider))
-    assert cfg.model.MODEL_CLASS is FalconMMModel
+    assert isinstance(cfg.model, (FalconQwen35ModelProvider, FalconQwen35MoEModelProvider))
+    assert cfg.model.MODEL_CLASS is FalconQwen35Model
     assert isinstance(cfg.dataset, EnergonDatasetConfig)
     assert isinstance(cfg.dataset.task_encoder, FalconEnergonTaskEncoderConfig)
     assert cfg.dataset.packing_buffer_size == 16
@@ -98,34 +98,34 @@ def _assert_energon_packing_contract(cfg: ConfigContainer) -> None:
     assert cfg.model.cuda_graph_impl == "none"
 
 
-class TestFalconMM2BSftRecipes:
+class TestFalconQwen352BSftRecipes:
     def test_1gpu_recipe_is_pp1_baseline(self):
-        cfg = recipe_module.falcon_mm_2b_sft_1gpu_h100_bf16_config()
+        cfg = recipe_module.falcon_qwen35_2b_sft_1gpu_h100_bf16_config()
         _assert_energon_packing_contract(cfg)
-        assert isinstance(cfg.model, FalconMMModelProvider)
+        assert isinstance(cfg.model, FalconQwen35ModelProvider)
         assert cfg.model.pipeline_model_parallel_size == 1
         assert cfg.model.virtual_pipeline_model_parallel_size is None
 
     def test_2gpu_recipe_enables_pp2(self):
-        cfg = recipe_module.falcon_mm_2b_sft_2gpu_h100_bf16_config()
+        cfg = recipe_module.falcon_qwen35_2b_sft_2gpu_h100_bf16_config()
         _assert_energon_packing_contract(cfg)
         assert cfg.model.pipeline_model_parallel_size == 2
         # VPP must stay unset for Energon packing (loader-state resume gap).
         assert cfg.model.virtual_pipeline_model_parallel_size is None
 
     def test_recipes_share_base(self):
-        cfg1 = recipe_module.falcon_mm_2b_sft_1gpu_h100_bf16_config()
-        cfg2 = recipe_module.falcon_mm_2b_sft_2gpu_h100_bf16_config()
+        cfg1 = recipe_module.falcon_qwen35_2b_sft_1gpu_h100_bf16_config()
+        cfg2 = recipe_module.falcon_qwen35_2b_sft_2gpu_h100_bf16_config()
         assert cfg1.model.seq_length == cfg2.model.seq_length == 4096
         assert cfg1.train.global_batch_size == cfg2.train.global_batch_size
         assert cfg1.dataset.seq_length == cfg2.dataset.seq_length
 
 
-class TestFalconMM2BMoEPretrainRecipes:
+class TestFalconQwen352BMoEPretrainRecipes:
     def test_4gpu_recipe_builds_moe_from_dense(self):
-        cfg = recipe_module.falcon_mm_2b_moe_pretrain_4gpu_h100_bf16_config()
+        cfg = recipe_module.falcon_qwen35_2b_moe_pretrain_4gpu_h100_bf16_config()
         _assert_energon_packing_contract(cfg)
-        assert isinstance(cfg.model, FalconMMMoEModelProvider)
+        assert isinstance(cfg.model, FalconQwen35MoEModelProvider)
         assert cfg.model.num_moe_experts == 8
         assert cfg.model.moe_router_topk == 2
         assert cfg.model.moe_ffn_hidden_size == max(128 // 4, 128)  # dense ffn in fake provider is 128
@@ -135,19 +135,19 @@ class TestFalconMM2BMoEPretrainRecipes:
         assert cfg.checkpoint.pretrained_checkpoint is None
 
     def test_8gpu_recipe_scales_ep(self):
-        cfg = recipe_module.falcon_mm_2b_moe_pretrain_8gpu_h100_bf16_config()
+        cfg = recipe_module.falcon_qwen35_2b_moe_pretrain_8gpu_h100_bf16_config()
         _assert_energon_packing_contract(cfg)
-        assert isinstance(cfg.model, FalconMMMoEModelProvider)
+        assert isinstance(cfg.model, FalconQwen35MoEModelProvider)
         assert cfg.model.expert_model_parallel_size == 4
         assert cfg.train.global_batch_size == 16
         assert cfg.checkpoint.pretrained_checkpoint is None
 
 
-class TestFalconMM35BA3BSftRecipes:
+class TestFalconQwen3535BA3BSftRecipes:
     def test_8gpu_recipe_enables_moe_and_pp(self):
-        cfg = recipe_module.falcon_mm_35b_a3b_sft_8gpu_h100_bf16_config()
+        cfg = recipe_module.falcon_qwen35_35b_a3b_sft_8gpu_h100_bf16_config()
         _assert_energon_packing_contract(cfg)
-        assert isinstance(cfg.model, FalconMMMoEModelProvider)
+        assert isinstance(cfg.model, FalconQwen35MoEModelProvider)
         assert cfg.model.pipeline_model_parallel_size == 2
         assert cfg.model.expert_model_parallel_size == 4
         assert cfg.model.tensor_model_parallel_size == 1
@@ -155,9 +155,9 @@ class TestFalconMM35BA3BSftRecipes:
         assert cfg.model.virtual_pipeline_model_parallel_size is None
 
     def test_16gpu_recipe_scales_ep(self):
-        cfg = recipe_module.falcon_mm_35b_a3b_sft_16gpu_h100_bf16_config()
+        cfg = recipe_module.falcon_qwen35_35b_a3b_sft_16gpu_h100_bf16_config()
         _assert_energon_packing_contract(cfg)
-        assert isinstance(cfg.model, FalconMMMoEModelProvider)
+        assert isinstance(cfg.model, FalconQwen35MoEModelProvider)
         assert cfg.model.pipeline_model_parallel_size == 2
         assert cfg.model.expert_model_parallel_size == 8
         assert cfg.train.global_batch_size == 32
