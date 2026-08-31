@@ -47,6 +47,8 @@ _MOCK_COMPRESS_RATIOS = [0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128]
 
 __all__ = [
     "falcon_deepseekv4_mock_2b6_pretrain_2gpu_h100_bf16_config",
+    "falcon_deepseekv4_mock_2b6_pretrain_2gpu_h100_bf16_cp2_config",
+    "falcon_deepseekv4_mock_2b6_pretrain_8gpu_h100_bf16_config",
 ]
 
 
@@ -137,7 +139,10 @@ def _falcon_deepseekv4_mock_2b6_provider() -> FalconDeepseekv4ModelProvider:
         make_vocab_size_divisible_by=1280,
         layernorm_epsilon=1e-6,
         gradient_accumulation_fusion=False,
-        cross_entropy_loss_fusion=False,
+        # Fused CE is required at 4k: the unfused path materializes several
+        # fp32 [seq, 129280] logit/softmax copies (~16 GiB in backward).
+        cross_entropy_loss_fusion=True,
+        cross_entropy_fusion_impl="native",
         calculate_per_token_loss=True,
         # "auto" satisfies the THD packing backend guard; the DSv4 attention
         # modules select their own kernels via dsa_kernel_backend.
@@ -153,11 +158,16 @@ def _apply_falcon_dsv4_energon_runtime(cfg: ConfigContainer, *, max_lr: float, m
     cfg.model.cuda_graph_impl = "none"
     cfg.model.virtual_pipeline_model_parallel_size = None
 
-    # Memory saving (off for the mock)
+    # Memory: fused CE only, no recompute. Both recompute modes are
+    # incompatible with this trunk at this time: selective recompute needs
+    # checkpointed core attention (unsupported in DSv4 Hybrid Attention) and
+    # full-layer recompute drops input_ids during the re-run, which breaks
+    # hash-routed MoE layers. Fused CE removes the dominant memory term
+    # (~16 GiB of fp32 logit/softmax copies at 4k).
     cfg.model.recompute_granularity = None
-    cfg.model.recompute_modules = None
     cfg.model.recompute_method = None
     cfg.model.recompute_num_layers = None
+    cfg.model.recompute_modules = None
 
     # Training config
     cfg.train.train_iters = 1000
@@ -215,7 +225,18 @@ def _apply_falcon_dsv4_energon_runtime(cfg: ConfigContainer, *, max_lr: float, m
     cfg.env_vars = {
         **COMMON_RECIPE_ENV_VARS,
         "CUDA_DEVICE_MAX_CONNECTIONS": 1,
+        # Varlen packs fragment the allocator; expandable segments avoid the
+        # reserved-but-unallocated growth seen at 4k on this trunk.
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
     }
+
+
+def _falcon_deepseekv4_mock_2b6_pretrain_base() -> ConfigContainer:
+    """Shared base for the ~2.6B mock DSv4 pretrain recipes."""
+    cfg = _pretrain_common()
+    cfg.model = _falcon_deepseekv4_mock_2b6_provider()
+    _apply_falcon_dsv4_energon_runtime(cfg, max_lr=3e-4, min_lr=3e-5)
+    return cfg
 
 
 def falcon_deepseekv4_mock_2b6_pretrain_2gpu_h100_bf16_config() -> ConfigContainer:
@@ -231,8 +252,46 @@ def falcon_deepseekv4_mock_2b6_pretrain_2gpu_h100_bf16_config() -> ConfigContain
     This is the current working config from the D1 spike. From-scratch only:
     pass ``checkpoint.pretrained_checkpoint=null`` to the launcher.
     """
-    cfg = _pretrain_common()
-    cfg.model = _falcon_deepseekv4_mock_2b6_provider()
+    cfg = _falcon_deepseekv4_mock_2b6_pretrain_base()
     cfg.model.expert_model_parallel_size = 2
-    _apply_falcon_dsv4_energon_runtime(cfg, max_lr=3e-4, min_lr=3e-5)
+    return cfg
+
+
+def falcon_deepseekv4_mock_2b6_pretrain_8gpu_h100_bf16_config() -> ConfigContainer:
+    """Return an 8-GPU from-scratch pretrain config for Falcon DSv4 (~2.6B mock).
+
+    Default configuration: 8 GPU
+    - TP=1, PP=1, CP=1, EP=2, DP=4 (D1-verified expert sharding, scaled out
+      by data parallelism)
+    - Same data plane, optimizer, and mock sizing as the 2-GPU recipe
+
+    From-scratch only: pass ``checkpoint.pretrained_checkpoint=null`` to the
+    launcher. Point ``dataset.path`` at the Energon mixture.
+    """
+    cfg = _falcon_deepseekv4_mock_2b6_pretrain_base()
+    cfg.model.expert_model_parallel_size = 2
+    return cfg
+
+
+def falcon_deepseekv4_mock_2b6_pretrain_2gpu_h100_bf16_cp2_config() -> ConfigContainer:
+    """Return a CP=2 pretrain config for Falcon DSv4 (~2.6B mock).
+
+    Default configuration: 2 GPU
+    - TP=1, PP=1, CP=2 (contiguous partition, D4), EP=1
+    - Energon-native THD packing with pad_to_max_length so every pack width
+      is divisible by the CP size (contiguous partition requirement)
+    - Same data plane, optimizer, and mock sizing as the CP=1 recipe
+
+    Launch with ``--step_func vlm_step``; the step slices each rank's
+    contiguous token window and visual payload batch-side.
+    """
+    cfg = _falcon_deepseekv4_mock_2b6_pretrain_base()
+    cfg.model.context_parallel_size = 2
+    cfg.model.expert_model_parallel_size = 1
+    cfg.model.cp_partition_mode = "contiguous"
+    # MCore config validation requires a packing-scheduler marker for
+    # contiguous CP. Bridge packs Energon-side, so MCore's scheduler is not
+    # in the data path; this only satisfies the THD-input declaration.
+    cfg.model.sequence_packing_scheduler = "dp_balanced"
+    cfg.dataset.pad_to_max_length = True
     return cfg

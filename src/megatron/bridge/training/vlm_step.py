@@ -34,14 +34,18 @@ from megatron.bridge.training.utils.flop_utils import (
     get_model_chunk_vp_stage,
     vision_patch_stats_from_grid_thw,
 )
-from megatron.bridge.training.utils.packed_seq_utils import get_packed_seq_params
+from megatron.bridge.training.utils.packed_seq_utils import (
+    get_packed_seq_params,
+    partition_packed_batch_contiguous,
+    slice_visual_inputs_contiguous,
+)
 from megatron.bridge.training.utils.pg_utils import get_pg_collection
 
 
 _VISUAL_PAYLOAD_FIELDS = frozenset(("pixel_values", "pixel_values_videos"))
 _PACKED_SEQ_DEVICE_KEYS = ("cu_seqlens_q", "cu_seqlens_kv", "cu_seqlens_q_padded", "cu_seqlens_kv_padded")
 _PACKED_SEQ_HOST_KEYS = ("max_seqlen_q", "max_seqlen_kv")
-_PACKED_SEQ_PARAM_KEYS = (*_PACKED_SEQ_DEVICE_KEYS, *_PACKED_SEQ_HOST_KEYS, "total_tokens")
+_PACKED_SEQ_PARAM_KEYS = (*_PACKED_SEQ_DEVICE_KEYS, *_PACKED_SEQ_HOST_KEYS, "total_tokens", "cp_partition_mode")
 
 
 def _unwrap_forward_module(model: Any) -> Any:
@@ -205,6 +209,32 @@ def get_batch(
 
     visual_inputs = batch.get("visual_inputs")
 
+    # Contiguous CP (DSv4 CSA): slice this rank's consecutive token window in
+    # the step, including the visual payload. Zigzag CP stays model-side
+    # (Qwen-style models slice internally). Sequence-length metadata stays
+    # global — the CSA compressor needs full pack boundaries.
+    cp_size = pg_collection.cp.size()
+    if batch.get("cu_seqlens_q") is not None and cp_size > 1:
+        cp_mode = getattr(cfg.model, "cp_partition_mode", "zigzag")
+        if cp_mode == "contiguous":
+            full_input_ids = batch.get("tokens") if batch.get("tokens") is not None else batch.get("input_ids")
+            local_len = full_input_ids.size(1) // cp_size
+            cp_rank = pg_collection.cp.rank()
+            # Pop the dataclass payload: the partition helper slices every
+            # non-metadata tensor in the dict and cannot index it.
+            batch.pop("visual_inputs", None)
+            batch = partition_packed_batch_contiguous(batch, cp_size)
+            if visual_inputs is not None:
+                visual_inputs = slice_visual_inputs_contiguous(
+                    visual_inputs,
+                    full_input_ids,
+                    cp_rank * local_len,
+                    (cp_rank + 1) * local_len,
+                    image_token_id=cfg.model.image_token_id,
+                    spatial_merge_size=cfg.model.spatial_merge_size,
+                )
+            batch["cp_partition_mode"] = cp_mode
+
     return (
         (batch.get("tokens") if batch.get("tokens") is not None else batch.get("input_ids")),
         batch.get("labels"),
@@ -317,6 +347,7 @@ def forward_step(
         state,
         tokens,
         vp_stage=get_model_chunk_vp_stage(model),
+        global_token_capacity=(tokens.shape[1] * pg_collection.cp.size() if tokens is not None else None),
         cu_seqlens=cu_seqlens,
         cu_seqlens_unpadded=cu_seqlens_unpadded,
         vision_patch_stats=vision_patch_stats,

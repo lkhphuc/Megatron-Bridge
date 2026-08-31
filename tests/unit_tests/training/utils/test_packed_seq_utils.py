@@ -22,9 +22,293 @@ from megatron.bridge.training.utils.packed_seq_utils import (
     get_packed_seq_params,
     get_packed_seq_q_cu_seqlens,
     get_thd_cp_partition_indices,
+    partition_packed_batch_contiguous,
     repack_mcore_thd_position_ids,
+    slice_visual_inputs_contiguous,
     unpack_mcore_thd_tensor_for_position_ids,
 )
+from megatron.bridge.training.utils.visual_inputs import GenericVisualInputs
+
+
+IMAGE_TOKEN_ID = 42
+MERGE = 2
+MERGE_SQ = MERGE * MERGE
+FEATURE_DIM = 3
+
+
+def _input_ids_from_visual_token_counts(
+    visual_token_counts: list[int],
+    *,
+    prefix: int = 0,
+    gap: int = 1,
+    suffix: int = 0,
+    fill: int = 0,
+) -> torch.Tensor:
+    ids: list[int] = [fill] * prefix
+    for image_idx, count in enumerate(visual_token_counts):
+        if image_idx > 0:
+            ids.extend([fill] * gap)
+        ids.extend([IMAGE_TOKEN_ID] * count)
+    ids.extend([fill] * suffix)
+    return torch.tensor([ids], dtype=torch.long)
+
+
+def _grid_for_visual_tokens(num_visual_tokens: int) -> torch.Tensor:
+    num_patches = num_visual_tokens * MERGE_SQ
+    return torch.tensor([1, 1, num_patches], dtype=torch.long)
+
+
+def _make_visual_inputs(
+    visual_token_counts: list[int],
+    *,
+    extra_fields: dict | None = None,
+) -> GenericVisualInputs:
+    grids = torch.stack([_grid_for_visual_tokens(count) for count in visual_token_counts])
+    total_patches = int(grids.prod(dim=1).sum().item())
+    pixel_values = torch.arange(total_patches * FEATURE_DIM, dtype=torch.float32).reshape(total_patches, FEATURE_DIM)
+    fields = {
+        "pixel_values": pixel_values,
+        "image_grid_thw": grids,
+    }
+    if extra_fields:
+        fields.update(extra_fields)
+    return GenericVisualInputs(**fields)
+
+
+class TestPartitionPackedBatchContiguous:
+    """Tests for partition_packed_batch_contiguous moved from deepseek_v4_step."""
+
+    def test_importable_from_packed_seq_utils(self):
+        assert callable(partition_packed_batch_contiguous)
+
+    def test_rank_slices_data_tensors(self):
+        tokens = torch.arange(8, dtype=torch.long).unsqueeze(0)
+        labels = torch.arange(8, dtype=torch.long).unsqueeze(0)
+        cu_seqlens = torch.tensor([[0, 4, 8]], dtype=torch.int32)
+
+        rank0 = partition_packed_batch_contiguous(
+            {"tokens": tokens.clone(), "labels": labels.clone(), "cu_seqlens": cu_seqlens.clone()},
+            cp_size=2,
+            cp_rank=0,
+        )
+        assert rank0["tokens"].shape == (1, 4)
+        assert torch.equal(rank0["tokens"].squeeze(), torch.arange(4, dtype=torch.long))
+        assert rank0["cu_seqlens"].squeeze().tolist() == [0, 4, 8]
+
+        rank1 = partition_packed_batch_contiguous(
+            {"tokens": tokens.clone(), "labels": labels.clone(), "cu_seqlens": cu_seqlens.clone()},
+            cp_size=2,
+            cp_rank=1,
+        )
+        assert rank1["tokens"].shape == (1, 4)
+        assert torch.equal(rank1["tokens"].squeeze(), torch.arange(4, 8, dtype=torch.long))
+
+    def test_rejects_non_divisible_length(self):
+        tokens = torch.arange(5, dtype=torch.long).unsqueeze(0)
+        batch = {"tokens": tokens, "cu_seqlens": torch.tensor([[0, 5]], dtype=torch.int32)}
+        with pytest.raises(RuntimeError, match="divisible by cp_size"):
+            partition_packed_batch_contiguous(batch, cp_size=2, cp_rank=0)
+
+
+class TestSliceVisualInputsContiguous:
+    """Tests for contiguous CP visual payload slicing."""
+
+    def test_none_or_missing_pixels_pass_through(self):
+        assert (
+            slice_visual_inputs_contiguous(None, torch.zeros(1, 4), 0, 4, image_token_id=1, spatial_merge_size=2)
+            is None
+        )
+
+        no_pixels = GenericVisualInputs(pixel_values=None, image_grid_thw=torch.zeros(1, 3))
+        assert (
+            slice_visual_inputs_contiguous(
+                no_pixels,
+                torch.zeros(1, 4),
+                0,
+                4,
+                image_token_id=IMAGE_TOKEN_ID,
+                spatial_merge_size=MERGE,
+            )
+            is no_pixels
+        )
+
+        no_grid = GenericVisualInputs(pixel_values=torch.zeros(4, FEATURE_DIM), image_grid_thw=None)
+        assert (
+            slice_visual_inputs_contiguous(
+                no_grid,
+                torch.zeros(1, 4),
+                0,
+                4,
+                image_token_id=IMAGE_TOKEN_ID,
+                spatial_merge_size=MERGE,
+            )
+            is no_grid
+        )
+
+    def test_window_covers_everything(self):
+        visual_inputs = _make_visual_inputs([4])
+        full_input_ids = _input_ids_from_visual_token_counts([4], prefix=2, suffix=2)
+        result = slice_visual_inputs_contiguous(
+            visual_inputs,
+            full_input_ids,
+            0,
+            full_input_ids.size(1),
+            image_token_id=IMAGE_TOKEN_ID,
+            spatial_merge_size=MERGE,
+        )
+        assert result is not None
+        assert torch.equal(result.pixel_values, visual_inputs.pixel_values)
+        assert torch.equal(result.image_grid_thw, visual_inputs.image_grid_thw)
+
+    def test_window_drops_first_image(self):
+        visual_inputs = _make_visual_inputs([2, 2])
+        full_input_ids = _input_ids_from_visual_token_counts([2, 2], prefix=1, gap=2, suffix=1)
+        image1_span_start = 1 + 2 + 2  # prefix + first span + gap
+        result = slice_visual_inputs_contiguous(
+            visual_inputs,
+            full_input_ids,
+            image1_span_start,
+            image1_span_start + 2,
+            image_token_id=IMAGE_TOKEN_ID,
+            spatial_merge_size=MERGE,
+        )
+        assert result is not None
+        expected_pixels = visual_inputs.pixel_values[8:16]
+        assert torch.equal(result.pixel_values, expected_pixels)
+        assert torch.equal(result.image_grid_thw, visual_inputs.image_grid_thw[1:2])
+
+    def test_left_straddle_keeps_prefix_patch_rows(self):
+        visual_inputs = _make_visual_inputs([6])
+        full_input_ids = _input_ids_from_visual_token_counts([6], prefix=2, suffix=2)
+        span_start = 2
+        window_end = 5
+        result = slice_visual_inputs_contiguous(
+            visual_inputs,
+            full_input_ids,
+            0,
+            window_end,
+            image_token_id=IMAGE_TOKEN_ID,
+            spatial_merge_size=MERGE,
+        )
+        assert result is not None
+        kept_tokens = window_end - span_start
+        expected_pixels = visual_inputs.pixel_values[: kept_tokens * MERGE_SQ]
+        assert torch.equal(result.pixel_values, expected_pixels)
+        assert torch.equal(result.image_grid_thw, torch.tensor([[1, 1, kept_tokens * MERGE_SQ]], dtype=torch.long))
+
+    def test_right_straddle_keeps_suffix_patch_rows(self):
+        visual_inputs = _make_visual_inputs([6])
+        full_input_ids = _input_ids_from_visual_token_counts([6], prefix=2, suffix=2)
+        span_start = 2
+        span_end = span_start + 6
+        window_start = 5
+        result = slice_visual_inputs_contiguous(
+            visual_inputs,
+            full_input_ids,
+            window_start,
+            span_end + 2,
+            image_token_id=IMAGE_TOKEN_ID,
+            spatial_merge_size=MERGE,
+        )
+        assert result is not None
+        kept_tokens = span_end - window_start
+        offset = (window_start - span_start) * MERGE_SQ
+        expected_pixels = visual_inputs.pixel_values[offset : offset + kept_tokens * MERGE_SQ]
+        assert torch.equal(result.pixel_values, expected_pixels)
+        assert torch.equal(result.image_grid_thw, torch.tensor([[1, 1, kept_tokens * MERGE_SQ]], dtype=torch.long))
+
+    def test_one_full_image_and_one_partial_image(self):
+        visual_inputs = _make_visual_inputs([2, 4])
+        full_input_ids = _input_ids_from_visual_token_counts([2, 4], prefix=1, gap=2, suffix=1)
+        second_span_start = 1 + 2 + 2  # prefix + first span + gap
+        result = slice_visual_inputs_contiguous(
+            visual_inputs,
+            full_input_ids,
+            0,
+            second_span_start + 2,
+            image_token_id=IMAGE_TOKEN_ID,
+            spatial_merge_size=MERGE,
+        )
+        assert result is not None
+        full_image_pixels = visual_inputs.pixel_values[:8]
+        partial_image_pixels = visual_inputs.pixel_values[8:16]
+        expected_pixels = torch.cat([full_image_pixels, partial_image_pixels], dim=0)
+        assert torch.equal(result.pixel_values, expected_pixels)
+        assert torch.equal(result.image_grid_thw[0], visual_inputs.image_grid_thw[0])
+        assert torch.equal(result.image_grid_thw[1], torch.tensor([1, 1, 2 * MERGE_SQ], dtype=torch.long))
+
+    def test_run_count_mismatch_raises(self):
+        visual_inputs = _make_visual_inputs([2, 2])
+        full_input_ids = _input_ids_from_visual_token_counts([4], prefix=1, suffix=1)
+        with pytest.raises(ValueError, match="Found 1 image placeholder runs"):
+            slice_visual_inputs_contiguous(
+                visual_inputs,
+                full_input_ids,
+                0,
+                full_input_ids.size(1),
+                image_token_id=IMAGE_TOKEN_ID,
+                spatial_merge_size=MERGE,
+            )
+
+    def test_video_fields_raise_not_implemented(self):
+        visual_inputs = _make_visual_inputs([2], extra_fields={"pixel_values_videos": torch.zeros(1, FEATURE_DIM)})
+        full_input_ids = _input_ids_from_visual_token_counts([2])
+        with pytest.raises(NotImplementedError, match="Video visual inputs"):
+            slice_visual_inputs_contiguous(
+                visual_inputs,
+                full_input_ids,
+                0,
+                full_input_ids.size(1),
+                image_token_id=IMAGE_TOKEN_ID,
+                spatial_merge_size=MERGE,
+            )
+
+        visual_inputs = _make_visual_inputs([2], extra_fields={"video_grid_thw": torch.zeros(1, 3)})
+        with pytest.raises(NotImplementedError, match="Video visual inputs"):
+            slice_visual_inputs_contiguous(
+                visual_inputs,
+                full_input_ids,
+                0,
+                full_input_ids.size(1),
+                image_token_id=IMAGE_TOKEN_ID,
+                spatial_merge_size=MERGE,
+            )
+
+    def test_zero_kept_returns_empty_shapes(self):
+        visual_inputs = _make_visual_inputs([2])
+        full_input_ids = _input_ids_from_visual_token_counts([2], prefix=2, suffix=2)
+        result = slice_visual_inputs_contiguous(
+            visual_inputs,
+            full_input_ids,
+            0,
+            1,
+            image_token_id=IMAGE_TOKEN_ID,
+            spatial_merge_size=MERGE,
+        )
+        assert result is not None
+        assert result.pixel_values.shape == (0, FEATURE_DIM)
+        assert result.image_grid_thw.shape == (0, 3)
+
+    def test_pass_through_fields_are_copied(self):
+        passthrough = {
+            "second_per_grid_ts": torch.tensor([1.5]),
+            "image_sizes": torch.tensor([[224, 224]]),
+            "image_position_ids": torch.tensor([[[0, 0]]]),
+            "mm_token_type_ids": torch.tensor([1]),
+        }
+        visual_inputs = _make_visual_inputs([2], extra_fields=passthrough)
+        full_input_ids = _input_ids_from_visual_token_counts([2], prefix=1, suffix=1)
+        result = slice_visual_inputs_contiguous(
+            visual_inputs,
+            full_input_ids,
+            1,
+            3,
+            image_token_id=IMAGE_TOKEN_ID,
+            spatial_merge_size=MERGE,
+        )
+        assert result is not None
+        for field_name, expected in passthrough.items():
+            assert getattr(result, field_name) is expected
 
 
 def test_get_packed_seq_q_cu_seqlens_prefers_padded_boundaries():

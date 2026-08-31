@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import inspect
+from dataclasses import replace
 
 import megatron.core
 import torch
@@ -23,9 +24,209 @@ from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.utils import get_batch_on_this_cp_rank
 from packaging.version import Version as PkgVersion
 
+from megatron.bridge.training.utils.visual_inputs import GenericVisualInputs
+
 
 PackedMetadataValue = torch.Tensor | int | None
+
+# Sequence-length metadata keys — excluded from token-dimension slicing.
+_SEQLEN_KEYS = frozenset(
+    {
+        "cu_seqlens",
+        "cu_seqlens_unpadded",
+        "cu_seqlens_argmin",
+        "cu_seqlens_unpadded_argmin",
+        "max_seqlen",
+        "cu_seqlens_q",
+        "cu_seqlens_kv",
+        "cu_seqlens_q_padded",
+        "cu_seqlens_kv_padded",
+        "max_seqlen_q",
+        "max_seqlen_kv",
+        "token_count",
+        "attention_mask",
+    }
+)
 _MIN_MCORE_THD_CP_VERSION = PkgVersion("0.18.0")
+
+
+def partition_packed_batch_contiguous(
+    batch: dict[str, torch.Tensor],
+    cp_size: int,
+    *,
+    cp_rank: int | None = None,
+) -> dict[str, torch.Tensor]:
+    """Slice a consecutive [start, end) token window for this CP rank.
+
+    Only data tensors (tokens, labels, loss_mask, position_ids, etc.) are sliced.
+    Sequence-length metadata (cu_seqlens, max_seqlen, ...) is intentionally kept
+    at global values — the DSv4 CSA compressor needs global sequence boundaries to
+    correctly exchange boundary hidden states between adjacent CP ranks.
+    This mirrors how zigzag mode leaves cu_seqlens untouched.
+
+    The packed sequence length must be divisible by cp_size — ensure
+    packed_sequence_size = N * cp_size when running pack_sft_data.
+
+    Args:
+        batch: Packed training batch with token tensors and optional metadata.
+        cp_size: Context-parallel world size.
+        cp_rank: Context-parallel rank. Uses MCore parallel state when omitted.
+
+    Returns:
+        The batch with data tensors sliced to this rank's contiguous window.
+    """
+    if cp_rank is None:
+        cp_rank = parallel_state.get_context_parallel_rank()
+
+    _data_val = next((v for k, v in batch.items() if v is not None and k not in _SEQLEN_KEYS), None)
+    if _data_val is None:
+        return batch  # middle PP stage with no data tensors — nothing to slice
+
+    total_tokens = _data_val.size(1)
+    if total_tokens % cp_size != 0:
+        raise RuntimeError(
+            f"Contiguous CP partitioning requires packed sequence length ({total_tokens}) "
+            f"to be divisible by cp_size ({cp_size}). "
+            "Set packed_sequence_size to a multiple of cp_size when running pack_sft_data."
+        )
+    local_len = total_tokens // cp_size
+    start = cp_rank * local_len
+    end = start + local_len
+
+    for key, val in batch.items():
+        if val is None or key in _SEQLEN_KEYS:
+            continue
+        batch[key] = val[:, start:end].contiguous()
+
+    return batch
+
+
+def _find_image_placeholder_runs(
+    full_input_ids: torch.Tensor,
+    image_token_id: int,
+) -> list[tuple[int, int]]:
+    """Return consecutive ``[start, end)`` image-placeholder spans.
+
+    ``full_input_ids`` is already on CUDA in the VLM batch path.  Detect run
+    boundaries with tensor operations and transfer only the compact boundary
+    vector to the host.  A Python token-by-token scan with ``Tensor.item()``
+    would otherwise introduce one CUDA synchronization per packed token.
+    """
+    flat = full_input_ids.reshape(-1)
+    is_image = flat == image_token_id
+    padded = torch.nn.functional.pad(is_image, (1, 1), value=False)
+    boundaries = torch.nonzero(padded[1:] != padded[:-1], as_tuple=False).flatten()
+    boundary_values = boundaries.tolist()
+    return list(zip(boundary_values[0::2], boundary_values[1::2], strict=True))
+
+
+def slice_visual_inputs_contiguous(
+    visual_inputs: GenericVisualInputs | None,
+    full_input_ids: torch.Tensor,
+    start: int,
+    end: int,
+    *,
+    image_token_id: int,
+    spatial_merge_size: int,
+) -> GenericVisualInputs | None:
+    """Slice visual payloads to match a contiguous CP token window.
+
+    Under contiguous context parallelism, each rank embeds only the pixel patches
+    whose placeholder tokens fall in ``[start, end)`` of the full packed stream.
+
+    Args:
+        visual_inputs: Visual modality tensors, or ``None``.
+        full_input_ids: Full pack token ids before CP slicing, shape ``[1, L]``.
+        start: Inclusive start of this rank's token window.
+        end: Exclusive end of this rank's token window.
+        image_token_id: Placeholder token id for merged visual tokens.
+        spatial_merge_size: Patch merger spatial merge factor.
+
+    Returns:
+        A new ``GenericVisualInputs`` with sliced ``pixel_values`` and
+        ``image_grid_thw``, or ``visual_inputs`` unchanged when there is nothing
+        to slice.
+
+    Raises:
+        ValueError: If placeholder run count does not match ``image_grid_thw``.
+        NotImplementedError: If video fields are present.
+        AssertionError: If kept placeholder tokens do not match kept patch rows.
+    """
+    if visual_inputs is None or visual_inputs.pixel_values is None or visual_inputs.image_grid_thw is None:
+        return visual_inputs
+    if visual_inputs.pixel_values_videos is not None or visual_inputs.video_grid_thw is not None:
+        raise NotImplementedError("Video visual inputs are not supported for contiguous CP slicing yet.")
+
+    pixel_values = visual_inputs.pixel_values
+    image_grid_thw = visual_inputs.image_grid_thw
+    merge_sq = spatial_merge_size * spatial_merge_size
+
+    placeholder_runs = _find_image_placeholder_runs(full_input_ids, image_token_id)
+    num_images = image_grid_thw.shape[0]
+    if len(placeholder_runs) != num_images:
+        raise ValueError(
+            f"Found {len(placeholder_runs)} image placeholder runs but image_grid_thw has {num_images} rows."
+        )
+
+    kept_pixel_chunks: list[torch.Tensor] = []
+    kept_grid_rows: list[torch.Tensor] = []
+    kept_placeholder_tokens = 0
+    patch_offset = 0
+    # ``image_grid_thw`` is also already on CUDA.  Transfer every patch count
+    # together instead of synchronizing once per image with ``prod().item()``.
+    patch_counts = image_grid_thw.prod(dim=-1).tolist()
+
+    for image_idx in range(num_images):
+        span_start, span_end = placeholder_runs[image_idx]
+        grid = image_grid_thw[image_idx]
+        num_patches = patch_counts[image_idx]
+        patch_start = patch_offset
+        patch_end = patch_offset + num_patches
+        patch_offset = patch_end
+
+        overlap_start = max(span_start, start)
+        overlap_end = min(span_end, end)
+        if overlap_start >= overlap_end:
+            continue
+
+        kept_placeholder_tokens += overlap_end - overlap_start
+        patch_slice_start = patch_start + (overlap_start - span_start) * merge_sq
+        patch_slice_end = patch_start + (overlap_end - span_start) * merge_sq
+        kept_pixel_chunks.append(pixel_values[patch_slice_start:patch_slice_end])
+
+        if overlap_start == span_start and overlap_end == span_end:
+            kept_grid_rows.append(grid)
+        else:
+            kept_visual_tokens = overlap_end - overlap_start
+            kept_grid_rows.append(
+                torch.tensor(
+                    [1, 1, kept_visual_tokens * merge_sq],
+                    dtype=image_grid_thw.dtype,
+                    device=image_grid_thw.device,
+                )
+            )
+
+    if kept_pixel_chunks:
+        new_pixel_values = torch.cat(kept_pixel_chunks, dim=0)
+        new_image_grid_thw = torch.stack(kept_grid_rows, dim=0)
+    else:
+        feature_dim = pixel_values.shape[1]
+        new_pixel_values = pixel_values.new_zeros((0, feature_dim))
+        new_image_grid_thw = image_grid_thw.new_zeros((0, 3))
+
+    expected_visual_tokens = new_pixel_values.shape[0] // merge_sq
+    if kept_placeholder_tokens != expected_visual_tokens:
+        raise AssertionError(
+            f"Kept placeholder token count ({kept_placeholder_tokens}) does not match "
+            f"kept patch rows ({new_pixel_values.shape[0]}) divided by merge**2 "
+            f"({expected_visual_tokens})."
+        )
+
+    return replace(
+        visual_inputs,
+        pixel_values=new_pixel_values,
+        image_grid_thw=new_image_grid_thw,
+    )
 
 
 def get_thd_cp_partition_indices(

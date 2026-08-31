@@ -29,10 +29,11 @@ Two DSv4-specific notes:
   (``HybridModel.forward`` passes them to the decoder when
   ``moe_n_hash_layers > 0``). The embedding lookup itself is skipped because
   ``decoder_input`` is provided.
-- Context parallelism requires the contiguous partition mode (the CSA
+- Context parallelism uses the contiguous partition mode (the CSA
   compressor exchanges boundary hidden states between adjacent CP ranks).
-  Rank-local contiguous slicing lands with the DSv4 step work (plan item
-  D4); this model asserts CP == 1 until then.
+  The step function slices this rank's token window and visual payload
+  batch-side (see ``vlm_step.get_batch``), so the model consumes rank-local
+  tensors and the scatter stays naturally rank-local.
 """
 
 import logging
@@ -109,7 +110,9 @@ class FalconDeepseekv4Model(MegatronModule):
 
     model_owns_packing = False
     model_owns_mtp_loss_mask_packing = False
-    model_slices_context_parallel_inputs = True
+    # The step slices contiguous CP inputs batch-side (informational flag;
+    # nothing in Bridge reads it at this time).
+    model_slices_context_parallel_inputs = False
 
     def __init__(
         self,
@@ -223,11 +226,6 @@ class FalconDeepseekv4Model(MegatronModule):
         """
         if pixel_values_videos is not None or video_grid_thw is not None:
             raise NotImplementedError("FalconDeepseekv4Model does not support video inputs yet.")
-        if self.pg_collection.cp.size() > 1:
-            raise NotImplementedError(
-                "FalconDeepseekv4Model supports CP=1 only at this time. "
-                "Contiguous CP slicing lands with the DSv4 step work (plan item D4)."
-            )
 
         combined_embeddings = None
         if self.pre_process:

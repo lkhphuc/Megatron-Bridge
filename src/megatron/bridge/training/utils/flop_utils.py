@@ -340,6 +340,7 @@ def accumulate_flops_metadata(
     *,
     vp_stage: int | None = None,
     config_seq_len: int | None = None,
+    global_token_capacity: int | None = None,
     cu_seqlens: torch.Tensor | None = None,
     cu_seqlens_argmin: torch.Tensor | None = None,
     cu_seqlens_unpadded: torch.Tensor | None = None,
@@ -359,9 +360,10 @@ def accumulate_flops_metadata(
     Writes accumulators consumed by ``train.py`` at end of step:
 
     - ``_flops_seqlen_sum``: ``mbs * tokens.shape[1]`` (padded total tokens
-      this microbatch contributes), or ``mbs * config_seq_len`` for dense
-      non-packed batches whose tensors were already context-parallel sliced.
-      Drives the linear MLP/proj/logit terms.
+      this microbatch contributes), or ``mbs * global_token_capacity`` when a
+      frontend supplies the physical width before context-parallel slicing.
+      Dense batches may still use ``config_seq_len`` as their fallback width.
+      This drives the linear MLP/proj/logit terms.
     - ``_flops_seqlen_sq_sum``: the THD attention term Σᵢ sᵢ², computed inline from
       ``cu_seqlens`` (preferring ``cu_seqlens_unpadded``). The per-pack sub-sequence
       lengths are reduced via :func:`_scalar_sum_for_accumulator`, which keeps the
@@ -398,7 +400,12 @@ def accumulate_flops_metadata(
 
     mbs = tokens.shape[0]
     tensor_seq_len = tokens.shape[1]
-    dense_seq_len = config_seq_len if isinstance(config_seq_len, int) and config_seq_len > 0 else tensor_seq_len
+    physical_seq_len = (
+        global_token_capacity
+        if isinstance(global_token_capacity, int) and global_token_capacity > 0
+        else tensor_seq_len
+    )
+    dense_seq_len = config_seq_len if isinstance(config_seq_len, int) and config_seq_len > 0 else physical_seq_len
 
     # THD attention term Σᵢ sᵢ², computed inline from cu_seqlens. The squared
     # sub-sequence lengths stay on-device (``_scalar_sum_for_accumulator`` returns a
@@ -408,7 +415,10 @@ def accumulate_flops_metadata(
     # (which would force a data-dependent-size sync) is needed.
     sub_seq_lens = _real_subseq_lengths(cu_seqlens, cu_seqlens_argmin, cu_seqlens_unpadded, cu_seqlens_unpadded_argmin)
     if sub_seq_lens is not None and sub_seq_lens.numel() > 0:
-        _add_flops_accumulator(state, "_flops_seqlen_sum", mbs * tensor_seq_len)
+        # CP frontends may pass rank-local token tensors with global packed
+        # boundaries. Count the global physical width for linear/MLP/MoE terms;
+        # the attention term already comes from the global cu_seqlens below.
+        _add_flops_accumulator(state, "_flops_seqlen_sum", mbs * physical_seq_len)
         setattr(state, "_flops_requires_global_reduce", True)
         _add_flops_accumulator(state, "_flops_seqlen_sq_sum", _scalar_sum_for_accumulator(sub_seq_lens.long() ** 2))
     else:

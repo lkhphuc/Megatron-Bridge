@@ -2833,17 +2833,25 @@ class TestAccumulateFlopsMetadata:
         assert state._flops_seqlen_sq_sum == 256**2 + 256**2 + 3584**2
         assert state._flops_requires_global_reduce
 
-    def test_config_seq_len_does_not_override_thd_cu_seqlens(self):
-        # config_seq_len is only a dense/non-packed fallback. THD still uses
-        # the actual packed tensor length for linear terms and cu_seqlens for
-        # attention work.
+    def test_global_token_capacity_restores_global_thd_width_for_cp(self):
+        # A CP frontend supplies rank-local tokens but global cu_seqlens. Use
+        # global_token_capacity for global linear work while retaining the exact
+        # packed sum-of-squares for attention work.
+        state = _State()
+        tokens = torch.zeros(1, 2048)
+        cu_seqlens = torch.tensor([0, 512, 2048])
+        accumulate_flops_metadata(state, tokens, global_token_capacity=4096, cu_seqlens=cu_seqlens)
+        assert state._flops_seqlen_sum == 4096
+        assert state._flops_seqlen_sq_sum == 512**2 + 1536**2
+        assert state._flops_requires_global_reduce
+
+    def test_config_seq_len_does_not_override_variable_thd_width(self):
         state = _State()
         tokens = torch.zeros(1, 2048)
         cu_seqlens = torch.tensor([0, 512, 2048])
         accumulate_flops_metadata(state, tokens, config_seq_len=4096, cu_seqlens=cu_seqlens)
         assert state._flops_seqlen_sum == 2048
         assert state._flops_seqlen_sq_sum == 512**2 + 1536**2
-        assert state._flops_requires_global_reduce
 
     def test_thd_padded_cu_seqlens_with_argmin(self):
         # Offline packed SFT pads cu_seqlens for CUDA graphs; the real
