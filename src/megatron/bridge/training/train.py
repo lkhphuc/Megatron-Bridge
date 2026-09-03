@@ -96,6 +96,12 @@ from megatron.bridge.training.tensor_inspect import (
 from megatron.bridge.training.utils import flop_utils
 from megatron.bridge.training.utils.log_utils import append_to_progress_log, barrier_and_log
 from megatron.bridge.training.utils.mlflow_utils import end_active_mlflow_run
+from megatron.bridge.training.utils.pack_stats_utils import (
+    accumulate_pack_stats_for_log_interval,
+    fold_pack_stats_into_train_state,
+    reset_pack_stats_accumulators,
+    resolve_global_pack_stats,
+)
 from megatron.bridge.training.utils.train_utils import (
     calc_params_l2_norm,
     logical_and_across_model_parallel_group,
@@ -490,6 +496,7 @@ def train(
         global_state._flops_cross_seqlen_sum = 0
         global_state._flops_cross_seqlen_product_sum = 0
         global_state._flops_requires_global_reduce = False
+        reset_pack_stats_accumulators(global_state)
 
         (
             loss_dict,
@@ -643,6 +650,14 @@ def train(
         global_state.train_state.floating_point_operations_so_far += num_floating_point_operations_in_batch
         num_floating_point_operations_so_far = global_state.train_state.floating_point_operations_so_far
         num_floating_point_operations_since_last_log_event += num_floating_point_operations_in_batch
+
+        pack_stats = resolve_global_pack_stats(
+            global_state,
+            data_parallel_size=dp_size,
+            dp_group=data_distribution_group,
+        )
+        fold_pack_stats_into_train_state(global_state.train_state, pack_stats)
+        accumulate_pack_stats_for_log_interval(global_state, pack_stats)
 
         # Logging.
         if not config.logger.skip_train_metrics_log:

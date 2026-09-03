@@ -15,7 +15,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import torch
 from megatron.core.models.gpt import experimental_attention_variant_module_specs
@@ -517,6 +517,25 @@ def vit_flops_from_patch_stats(
     )
 
     return (transformer_flops_val + merger_flops_val) * 3  # 3x for training (fwd + bwd)
+
+
+def resolve_spatial_merge_size(model_cfg: Any, *, default: int = 2) -> int:
+    """Resolve vision spatial merge size for FLOPs / pack-token accounting.
+
+    Prefer the provider-level ``spatial_merge_size`` (Falcon DSv4 sets merge=1
+    there and has no ``vision_config``). Fall back to ``vision_config``, then
+    ``default``. Defaulting a missing ``vision_config`` straight to 2 under-counts
+    Falcon ``data/image-tokens`` by 4x.
+    """
+    merge = getattr(model_cfg, "spatial_merge_size", None)
+    if merge is not None:
+        return max(int(merge), 1)
+    vision_config = getattr(model_cfg, "vision_config", None)
+    if vision_config is not None:
+        merge = getattr(vision_config, "spatial_merge_size", None)
+        if merge is not None:
+            return max(int(merge), 1)
+    return max(int(default), 1)
 
 
 def vision_patch_stats_from_grid_thw(

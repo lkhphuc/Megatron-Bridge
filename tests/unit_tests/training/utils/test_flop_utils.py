@@ -33,6 +33,7 @@ from megatron.bridge.training.utils.flop_utils import (
     num_floating_point_operations,
     resolve_global_flops_runtime_stats,
     resolve_global_flops_seqlen_stats,
+    resolve_spatial_merge_size,
     vision_patch_stats_from_grid_thw,
     vit_flops,
     vit_flops_from_grid_thw,
@@ -1931,6 +1932,17 @@ class TestVitFlops:
 
         assert vision_patch_stats_from_grid_thw(video_grid, spatial_merge_size=2) == (200, 20_000, 50)
         assert vit_flops_from_grid_thw(cfg, video_grid) == vit_flops(cfg, batch_size=2, num_patches=100)
+
+    def test_resolve_spatial_merge_size_prefers_provider_over_missing_vision_config(self):
+        assert resolve_spatial_merge_size(SimpleNamespace(spatial_merge_size=1)) == 1
+        assert resolve_spatial_merge_size(SimpleNamespace()) == 2
+        assert (
+            resolve_spatial_merge_size(
+                SimpleNamespace(spatial_merge_size=1, vision_config=SimpleNamespace(spatial_merge_size=2))
+            )
+            == 1
+        )
+        assert resolve_spatial_merge_size(SimpleNamespace(vision_config=SimpleNamespace(spatial_merge_size=2))) == 2
 
     def test_grid_thw_supports_thinker_nested_vision_config(self):
         """Qwen-Omni stores its vision config below thinker_config."""

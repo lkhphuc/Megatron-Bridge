@@ -80,6 +80,7 @@ from megatron.bridge.models.falcon_mm.data.visual_markers import (
 from megatron.bridge.models.qwen_vl.data.collate_fn import QWEN_VISUAL_KEYS, QwenVLPreparedSequence
 from megatron.bridge.models.qwen_vl.data.energon import (
     QwenVLPackedTaskSample,
+    QwenVLTaskBatch,
     QwenVLTaskEncoder,
     QwenVLTaskSample,
     _aligned_sequence_length,
@@ -107,6 +108,16 @@ logger = logging.getLogger(__name__)
 # rate stays observable.
 _SKIP_WARNING_LOG_LIMIT = 32
 _SKIP_WARNING_REPORT_EVERY = 1000
+
+# Stable reason keys piggybacked onto successful packs for WandB ``data/skipped-*``.
+SKIP_REASON_OVERLONG = "overlong"
+SKIP_REASON_MAX_NUM_IMAGES = "max_num_images"
+SKIP_REASON_MAX_VISUAL_TOKENS = "max_visual_tokens"
+SKIP_REASON_GEOMETRY = "geometry"
+SKIP_REASON_DECOMPRESSION_BOMB = "decompression_bomb"
+SKIP_REASON_CHATML_OVERLENGTH = "chatml_overlength"
+SKIP_REASON_LENGTH_MISMATCH = "length_mismatch"
+SKIP_REASON_OVERSIZE_PACK = "oversize_pack"
 
 
 def visual_tokens_for_resized(
@@ -363,9 +374,32 @@ class FalconTaskEncoder(QwenVLTaskEncoder):
         elif count % _SKIP_WARNING_REPORT_EVERY == 0:
             logger.warning("Falcon-MM skipped %d samples so far in this process.", count)
 
+    def _record_skip(self, reason: str, *, count: int = 1) -> None:
+        """Accumulate skipped-sample counts for WandB ``data/skipped-*`` metrics."""
+        if count <= 0:
+            return
+        counts = getattr(self, "_pack_skip_counts", None)
+        if counts is None:
+            counts = {}
+            self._pack_skip_counts = counts
+        counts[reason] = counts.get(reason, 0) + count
+
+    def _consume_skip_stats(self) -> dict[str, int]:
+        """Return and clear skip deltas since the last successful pack."""
+        counts = getattr(self, "_pack_skip_counts", None)
+        self._pack_skip_counts = {}
+        return dict(counts) if counts else {}
+
+    def encode_batch(self, batch: QwenVLTaskBatch) -> dict:
+        """Encode batch dict and attach per-worker skip deltas for pack-stats logging."""
+        raw = super().encode_batch(batch)
+        raw["pack_skip_stats"] = self._consume_skip_stats()
+        return raw
+
     def _too_many_images_reason(self, sample_key: Any, num_images: int, max_num_images: int | None) -> str | None:
         """Return a drop reason when a sample exceeds the image-count budget."""
         if max_num_images is not None and num_images > max_num_images:
+            self._record_skip(SKIP_REASON_MAX_NUM_IMAGES)
             self._log_skip_warning(
                 "Defer-dropping sample %s: %d images exceeds max_num_images=%d (pre-decode)",
                 sample_key,
@@ -382,6 +416,7 @@ class FalconTaskEncoder(QwenVLTaskEncoder):
         restore cannot swallow ``SkipSample`` (``Unexpected skip sample``).
         """
         if packing_length > self.seq_length:
+            self._record_skip(SKIP_REASON_OVERLONG)
             self._log_skip_warning(
                 "Defer-dropping sample %s: packing length %d exceeds seq_length=%d",
                 sample_key,
@@ -436,6 +471,7 @@ class FalconTaskEncoder(QwenVLTaskEncoder):
     def postencode_sample(self, sample: FalconPendingSample) -> QwenVLTaskSample:
         """Decode selected images and run the document or ChatML processor path."""
         if sample.drop_reason:
+            # Counted once when drop_reason was set in preencode.
             raise SkipSample()
         if sample.chatml is not None:
             return self._postencode_chatml(sample)
@@ -444,6 +480,7 @@ class FalconTaskEncoder(QwenVLTaskEncoder):
                 raise ValueError("Document postencode requires image_target_sizes from preencode.")
             images = _materialize_pending_images(sample.images, target_sizes=sample.image_target_sizes)
         except Image.DecompressionBombError:
+            self._record_skip(SKIP_REASON_DECOMPRESSION_BOMB)
             self._log_skip_warning(
                 "Skipping sample %s: Pillow DecompressionBombError",
                 sample.__key__,
@@ -466,6 +503,7 @@ class FalconTaskEncoder(QwenVLTaskEncoder):
             encoded = super().encode_sample(sample.chatml)
         except ValueError as error:
             if "exceeds seq_length" in str(error):
+                self._record_skip(SKIP_REASON_CHATML_OVERLENGTH)
                 self._log_skip_warning("Skipping sample %s: %s", sample.__key__, error)
                 raise SkipSample() from error
             raise
@@ -474,6 +512,7 @@ class FalconTaskEncoder(QwenVLTaskEncoder):
                 encoded.prepared_sequence, self.in_batch_packing_pad_to_multiple_of
             )
             if actual_length > sample.packing_length:
+                self._record_skip(SKIP_REASON_CHATML_OVERLENGTH)
                 self._log_skip_warning(
                     "Skipping sample %s: ChatML postencode length %d exceeds preencode packing_length %d",
                     sample.__key__,
@@ -524,6 +563,7 @@ class FalconTaskEncoder(QwenVLTaskEncoder):
         """
         prepared = [sample for sample in samples if sample.prepared_sequence is not None]
         if not prepared:
+            # Members already recorded their own skips during postencode.
             raise SkipSample()
         packed_length = sum(
             _aligned_sequence_length(sample.prepared_sequence, self.in_batch_packing_pad_to_multiple_of)
@@ -531,6 +571,7 @@ class FalconTaskEncoder(QwenVLTaskEncoder):
             if sample.prepared_sequence is not None
         )
         if packed_length > self.seq_length:
+            self._record_skip(SKIP_REASON_OVERSIZE_PACK, count=len(prepared))
             self._log_skip_warning(
                 "Skipping oversize pack keys=%s: prepared length %d exceeds seq_length=%d",
                 [sample.__key__ for sample in prepared],
@@ -667,6 +708,7 @@ class FalconTaskEncoder(QwenVLTaskEncoder):
                 )
             packing_length = self._align_packing_length(self._document_token_count(text, visual_token_counts))
         except (TypeError, ValueError) as error:
+            self._record_skip(SKIP_REASON_GEOMETRY)
             self._log_skip_warning("Defer-dropping sample %s: %s", sample_key, error)
             return self._dropped_pending(
                 sample,
@@ -727,6 +769,7 @@ class FalconTaskEncoder(QwenVLTaskEncoder):
                 for image in images
             )
         except (TypeError, ValueError, AttributeError) as error:
+            self._record_skip(SKIP_REASON_GEOMETRY)
             self._log_skip_warning("Defer-dropping sample %s: %s", sample.__key__, error)
             return self._dropped_pending(
                 sample,
@@ -762,6 +805,7 @@ class FalconTaskEncoder(QwenVLTaskEncoder):
                 prepared_sequence.visual_values.get("image_grid_thw"), self.merge_size
             )
             if total_visual_tokens > self.max_visual_tokens:
+                self._record_skip(SKIP_REASON_MAX_VISUAL_TOKENS)
                 self._log_skip_warning(
                     "Skipping sample %s: %d visual tokens exceeds max_visual_tokens=%d",
                     sample.__key__,
@@ -789,8 +833,10 @@ class FalconTaskEncoder(QwenVLTaskEncoder):
                 sample.max_pixels,
             )
             if actual_length > sample.packing_length:
+                self._record_skip(SKIP_REASON_LENGTH_MISMATCH)
                 raise SkipSample()
         if actual_length > self.seq_length:
+            self._record_skip(SKIP_REASON_OVERLONG)
             self._log_skip_warning(
                 "Skipping sample %s: aligned sequence length %d exceeds seq_length=%d",
                 sample.__key__,

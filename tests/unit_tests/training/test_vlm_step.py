@@ -164,6 +164,25 @@ def test_get_batch_from_iterator_moves_visual_inputs_to_cuda(monkeypatch):
     assert out_vi.pixel_values is not None and out_vi.image_grid_thw is not None
 
 
+def test_get_batch_from_iterator_preserves_pack_skip_stats():
+    batch = _make_batch()
+    batch["pack_skip_stats"] = {"overlong": 2, "max_num_images": 1}
+    for key in ["tokens", "input_ids", "position_ids", "labels", "loss_mask", "attention_mask"]:
+        batch[key] = _as_nocuda(batch[key])
+    vi = batch["visual_inputs"]
+    vi.pixel_values = _as_nocuda(vi.pixel_values)
+    vi.image_grid_thw = _as_nocuda(vi.image_grid_thw)
+
+    out = get_batch_from_iterator(
+        _Iterator(batch),
+        use_mtp=False,
+        skip_getting_attention_mask_from_dataset=True,
+        is_first_pp_stage=True,
+        is_last_pp_stage=True,
+    )
+    assert out["pack_skip_stats"] == {"overlong": 2, "max_num_images": 1}
+
+
 def test_get_batch_from_iterator_projects_visual_payload_on_middle_pp_stage():
     batch = _make_batch()
     for key in ["tokens", "input_ids", "position_ids", "labels", "loss_mask", "attention_mask"]:
@@ -371,6 +390,22 @@ def test_forward_step_preserves_independent_image_flops_boundaries(monkeypatch):
     assert state._flops_requires_global_reduce is True
 
 
+def test_forward_step_uses_provider_spatial_merge_without_vision_config(monkeypatch):
+    """Falcon DSv4: merge size lives on the provider; missing vision_config must not default to 2."""
+    inner_model = _Gemma4LikeForwardModel()
+    model = _ForwardWrapper(inner_model)
+    _patch_forward_step_deps(monkeypatch, model)
+    state = _make_forward_step_state()
+    state.cfg.model.spatial_merge_size = 1
+    batch = _make_visual_forward_batch()
+    batch["visual_inputs"].image_grid_thw = torch.tensor([[1, 10, 10], [1, 10, 10]])
+
+    forward_step(state, _Iterator(batch), model)
+
+    assert state._flops_vision_patch_sum == 200
+    assert state._flops_vision_merged_token_sum == 200
+
+
 def test_forward_step_rejects_deferred_in_batch_packing(monkeypatch):
     inner_model = _PackedForwardModel()
     model = _ForwardWrapper(inner_model)
@@ -496,6 +531,7 @@ def test_get_batch_consumes_collated_packed_metadata(monkeypatch):
         out_position_ids,
         packed_seq_params,
         visual_inputs,
+        pack_skip_stats,
     ) = get_batch(it, cfg, use_mtp=False, pg_collection=_MockPGCollection())
 
     assert out_tokens.shape == (1, 8)
@@ -511,6 +547,7 @@ def test_get_batch_consumes_collated_packed_metadata(monkeypatch):
     assert out_attention_mask is None
     assert torch.equal(out_tokens.cpu(), tokens)
     assert visual_inputs is not None
+    assert pack_skip_stats is None
 
 
 def test_get_batch_consumes_current_padded_cu_seqlens(monkeypatch):
@@ -564,6 +601,7 @@ def test_get_batch_consumes_current_padded_cu_seqlens(monkeypatch):
         out_position_ids,
         packed_seq_params,
         _,
+        pack_skip_stats,
     ) = get_batch(it, cfg, use_mtp=False, pg_collection=_MockPGCollection(cp_size=2))
 
     assert out_tokens.shape[1] == 12
@@ -576,6 +614,7 @@ def test_get_batch_consumes_current_padded_cu_seqlens(monkeypatch):
     assert packed_seq_params["cu_seqlens_kv_padded"].tolist() == [0, 4, 12]
     assert packed_seq_params["max_seqlen_q"].item() == 8
     assert packed_seq_params["max_seqlen_kv"].item() == 8
+    assert pack_skip_stats is None
 
 
 def test_forward_step_schedule_plan(monkeypatch):

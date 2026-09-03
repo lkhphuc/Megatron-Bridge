@@ -279,21 +279,32 @@ class TestFalconTaskEncoder:
         assert pending.drop_reason is not None
         assert pending.drop_reason.startswith("overlong:")
         assert pending.packing_length > encoder.seq_length
+        assert encoder._pack_skip_counts.get("overlong") == 1
 
         packs = encoder.select_samples_to_pack([pending])
         assert packs == [[pending]]
         with pytest.raises(SkipSample):
             encoder.postencode_sample(pending)
+        # Deferred drop must not double-count at postencode.
+        assert encoder._pack_skip_counts.get("overlong") == 1
 
-    def test_select_isolates_dropped_from_keep(self):
-        encoder = self._make_encoder(enable_energon_packing=True)
-        keep = encoder.preencode_sample(_crude_sample({"text": "hello"}))
-        drop = encoder.preencode_sample(_crude_sample({"text": "hello"}))
-        drop.drop_reason = "overlong:999>8"
-        packs = encoder.select_samples_to_pack([keep, drop])
-        assert [keep] in packs
-        assert [drop] in packs
-        assert not any(keep in group and drop in group for group in packs)
+    def test_encode_batch_attaches_and_clears_skip_stats(self, monkeypatch):
+        encoder = self._make_encoder(enable_energon_packing=True, max_padding_length=8)
+        encoder.preencode_sample(_crude_sample({"text": "word " * 200}))
+        monkeypatch.setattr(QwenVLTaskEncoder, "encode_batch", lambda self, batch: {"input_ids": None})
+        out = encoder.encode_batch(None)
+        assert out["pack_skip_stats"] == {"overlong": 1}
+        assert encoder._consume_skip_stats() == {}
+
+    def test_max_num_images_records_skip(self):
+        encoder = self._make_encoder(enable_energon_packing=True, max_num_images=1)
+        document = ImageDocument.from_bytes(_tiff_bytes((8, 8), (8, 8)))
+        pending = encoder.preencode_sample(
+            _document_sample(["a", ImagePageRef(document, 0), "b", ImagePageRef(document, 1), "c"])
+        )
+        assert pending.drop_reason is not None
+        assert pending.drop_reason.startswith("max_num_images:")
+        assert encoder._pack_skip_counts.get("max_num_images") == 1
 
     def test_pack_selected_samples_skips_oversize_prepared_group(self):
         from megatron.bridge.models.qwen_vl.data.collate_fn import QwenVLPreparedSequence
@@ -317,6 +328,17 @@ class TestFalconTaskEncoder:
         )
         with pytest.raises(SkipSample):
             encoder.pack_selected_samples([sample])
+        assert encoder._pack_skip_counts.get("oversize_pack") == 1
+
+    def test_select_isolates_dropped_from_keep(self):
+        encoder = self._make_encoder(enable_energon_packing=True)
+        keep = encoder.preencode_sample(_crude_sample({"text": "hello"}))
+        drop = encoder.preencode_sample(_crude_sample({"text": "hello"}))
+        drop.drop_reason = "overlong:999>8"
+        packs = encoder.select_samples_to_pack([keep, drop])
+        assert [keep] in packs
+        assert [drop] in packs
+        assert not any(keep in group and drop in group for group in packs)
 
     def test_preencode_packing_length_matches_postencode(self):
         """Header geometry + tokenizer must match the processor row length."""

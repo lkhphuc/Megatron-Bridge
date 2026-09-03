@@ -45,6 +45,7 @@ from megatron.bridge.training.config import ConfigContainer, ProfilingConfig, Tr
 from megatron.bridge.training.forward_step_func_types import ForwardStepCallable
 from megatron.bridge.training.state import GlobalState, TrainState
 from megatron.bridge.training.utils.mlflow_utils import _sanitize_mlflow_metrics
+from megatron.bridge.training.utils.pack_stats_utils import consume_pack_stats_log_metrics
 from megatron.bridge.training.utils.pg_utils import get_pg_collection
 from megatron.bridge.training.utils.theoretical_memory_utils import report_theoretical_memory
 from megatron.bridge.utils.common_utils import get_rank_safe, get_world_size_safe, print_rank_0, print_rank_last
@@ -888,6 +889,18 @@ def training_log(
                 mlflow_logger.log_metrics(_sanitize_mlflow_metrics(l2_report), step=iteration)
             if comet_logger:
                 comet_logger.log_metrics(l2_report, step=iteration)
+        # Packed multimodal dataloader stats (Energon / THD).
+        pack_report = consume_pack_stats_log_metrics(global_state, train_state)
+        if pack_report:
+            if writer:
+                for metric, value in pack_report.items():
+                    writer.add_scalar(metric, value, iteration)
+            if wandb_writer:
+                wandb_writer.log(pack_report, iteration)
+            if mlflow_logger:
+                mlflow_logger.log_metrics(_sanitize_mlflow_metrics(pack_report), step=iteration)
+            if comet_logger:
+                comet_logger.log_metrics(pack_report, step=iteration)
         if wandb_writer:
             wandb_writer.log({"samples vs steps": train_state.consumed_train_samples}, iteration)
         if mlflow_logger:

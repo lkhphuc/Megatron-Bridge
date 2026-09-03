@@ -51,6 +51,10 @@ class TestTrainState:
         assert state.skipped_train_samples == 0
         assert state.consumed_valid_samples == 0
         assert state.floating_point_operations_so_far == 0
+        assert state.consumed_pack_docs == 0
+        assert state.consumed_images == 0
+        assert state.consumed_image_tokens == 0
+        assert state.consumed_real_tokens == 0
         assert state.do_train is False
         assert state.do_valid is False
         assert state.do_test is False
@@ -99,6 +103,10 @@ class TestTrainState:
             "skipped_train_samples",
             "consumed_valid_samples",
             "floating_point_operations_so_far",
+            "consumed_pack_docs",
+            "consumed_images",
+            "consumed_image_tokens",
+            "consumed_real_tokens",
             "do_train",
             "do_valid",
             "do_test",
@@ -113,6 +121,10 @@ class TestTrainState:
         assert state_dict["skipped_train_samples"].dtype == torch.int64
         assert state_dict["consumed_valid_samples"].dtype == torch.int64
         assert state_dict["floating_point_operations_so_far"].dtype == torch.float64
+        assert state_dict["consumed_pack_docs"].dtype == torch.int64
+        assert state_dict["consumed_images"].dtype == torch.int64
+        assert state_dict["consumed_image_tokens"].dtype == torch.int64
+        assert state_dict["consumed_real_tokens"].dtype == torch.int64
         assert state_dict["do_train"].dtype == torch.bool
         assert state_dict["do_valid"].dtype == torch.bool
         assert state_dict["do_test"].dtype == torch.bool

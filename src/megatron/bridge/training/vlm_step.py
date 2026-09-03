@@ -32,8 +32,10 @@ from megatron.bridge.training.state import GlobalState
 from megatron.bridge.training.utils.flop_utils import (
     accumulate_flops_metadata,
     get_model_chunk_vp_stage,
+    resolve_spatial_merge_size,
     vision_patch_stats_from_grid_thw,
 )
+from megatron.bridge.training.utils.pack_stats_utils import accumulate_pack_skip_stats, accumulate_pack_stats
 from megatron.bridge.training.utils.packed_seq_utils import (
     get_packed_seq_params,
     partition_packed_batch_contiguous,
@@ -46,6 +48,8 @@ _VISUAL_PAYLOAD_FIELDS = frozenset(("pixel_values", "pixel_values_videos"))
 _PACKED_SEQ_DEVICE_KEYS = ("cu_seqlens_q", "cu_seqlens_kv", "cu_seqlens_q_padded", "cu_seqlens_kv_padded")
 _PACKED_SEQ_HOST_KEYS = ("max_seqlen_q", "max_seqlen_kv")
 _PACKED_SEQ_PARAM_KEYS = (*_PACKED_SEQ_DEVICE_KEYS, *_PACKED_SEQ_HOST_KEYS, "total_tokens", "cp_partition_mode")
+# Host-side metadata preserved through get_batch_from_iterator (not moved to CUDA).
+_HOST_PASSTHROUGH_KEYS = frozenset({"pack_skip_stats"})
 
 
 def _unwrap_forward_module(model: Any) -> Any:
@@ -161,6 +165,8 @@ def get_batch_from_iterator(
                 _batch_required_keys[key] = val.cuda(non_blocking=True) if val is not None else None
         elif key in required_host_keys:
             _batch_required_keys[key] = val.cpu() if val is not None else None
+        elif key in _HOST_PASSTHROUGH_KEYS:
+            _batch_required_keys[key] = val
         else:
             _batch_required_keys[key] = None
 
@@ -208,6 +214,7 @@ def get_batch(
     )
 
     visual_inputs = batch.get("visual_inputs")
+    pack_skip_stats = batch.get("pack_skip_stats")
 
     # Contiguous CP (DSv4 CSA): slice this rank's consecutive token window in
     # the step, including the visual payload. Zigzag CP stays model-side
@@ -220,9 +227,10 @@ def get_batch(
             full_input_ids = batch.get("tokens") if batch.get("tokens") is not None else batch.get("input_ids")
             local_len = full_input_ids.size(1) // cp_size
             cp_rank = pg_collection.cp.rank()
-            # Pop the dataclass payload: the partition helper slices every
-            # non-metadata tensor in the dict and cannot index it.
+            # Pop non-tensor payloads: the partition helper slices every
+            # non-metadata tensor in the dict and cannot index them.
             batch.pop("visual_inputs", None)
+            batch.pop("pack_skip_stats", None)
             batch = partition_packed_batch_contiguous(batch, cp_size)
             if visual_inputs is not None:
                 visual_inputs = slice_visual_inputs_contiguous(
@@ -245,6 +253,7 @@ def get_batch(
         if batch.get("cu_seqlens_q") is not None
         else None,
         visual_inputs,
+        pack_skip_stats,
     )
 
 
@@ -296,6 +305,7 @@ def forward_step(
             position_ids,
             packed_seq_params,
             visual_inputs,
+            pack_skip_stats,
         ) = get_batch(
             data_iterator,
             state.cfg,
@@ -321,11 +331,12 @@ def forward_step(
     # Qwen vision attention isolates temporal frames. Preserve additive patch
     # statistics for every media/frame boundary instead of treating the physical
     # text pack as one giant image. Device scalars avoid a host sync here.
-    vision_config = getattr(getattr(state.cfg, "model", config), "vision_config", None)
+    model_cfg = getattr(state.cfg, "model", config)
     # Every DP rank using this VLM step must enter the same reduction, including
     # a rank whose current sample happens to contain no media.
     vision_patch_stats = (0, 0, 0)
-    spatial_merge_size = getattr(vision_config, "spatial_merge_size", 2)
+    # Prefer provider ``spatial_merge_size`` (Falcon DSv4 has no vision_config).
+    spatial_merge_size = resolve_spatial_merge_size(model_cfg)
     if visual_inputs is not None:
         for grid in (
             getattr(visual_inputs, "image_grid_thw", None),
@@ -346,12 +357,22 @@ def forward_step(
     accumulate_flops_metadata(
         state,
         tokens,
-        vp_stage=get_model_chunk_vp_stage(model),
+        vp_stage=vp_stage,
         global_token_capacity=(tokens.shape[1] * pg_collection.cp.size() if tokens is not None else None),
         cu_seqlens=cu_seqlens,
         cu_seqlens_unpadded=cu_seqlens_unpadded,
         vision_patch_stats=vision_patch_stats,
     )
+    accumulate_pack_stats(
+        state,
+        tokens,
+        packed_seq_params=packed_seq_params,
+        visual_inputs=visual_inputs,
+        loss_mask=loss_mask,
+        spatial_merge_size=spatial_merge_size,
+        vp_stage=vp_stage,
+    )
+    accumulate_pack_skip_stats(state, pack_skip_stats, vp_stage=vp_stage)
 
     forward_args = {
         "input_ids": tokens,
