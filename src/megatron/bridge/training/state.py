@@ -534,7 +534,7 @@ def _timers_write_to_wandb(
     if writer is not None:
         for name in name_to_min_max_time:
             _, max_time = name_to_min_max_time[name]
-            writer.log({name + "-time": max_time}, iteration)
+            writer.log({f"timing/{name}": max_time}, iteration)
 
 
 def _timers_write_to_mlflow(
@@ -553,7 +553,8 @@ def _timers_write_to_mlflow(
         metrics: dict[str, float] = {}
         for name in name_to_min_max_time:
             _, max_time = name_to_min_max_time[name]
-            sanitized_name = name.replace("/", "_") + "-time"
+            # MLFlow rejects ``/`` in metric names; keep a timing_ prefix after sanitize.
+            sanitized_name = f"timing/{name}".replace("/", "_")
             metrics[sanitized_name] = max_time
         try:
             logger.log_metrics(metrics, step=iteration)
@@ -579,7 +580,7 @@ def _timers_write_to_comet(
         metrics: dict[str, float] = {}
         for name in name_to_min_max_time:
             _, max_time = name_to_min_max_time[name]
-            metrics[name + "-time"] = max_time
+            metrics[f"timing/{name}"] = max_time
         try:
             logger.log_metrics(metrics, step=iteration)
         except Exception:

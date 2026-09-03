@@ -1137,13 +1137,15 @@ def training_log(
         # timers
         if logger_config.log_timers_to_tensorboard:
             if writer:
-                writer.add_scalar("iteration-time", elapsed_time_per_iteration, iteration)
+                writer.add_scalar("timing/iteration", elapsed_time_per_iteration, iteration)
             if wandb_writer:
-                wandb_writer.log({"iteration-time": elapsed_time_per_iteration}, iteration)
+                wandb_writer.log({"timing/iteration": elapsed_time_per_iteration}, iteration)
             if mlflow_logger:
-                mlflow_logger.log_metrics({"iteration-time": elapsed_time_per_iteration}, step=iteration)
+                mlflow_logger.log_metrics(
+                    _sanitize_mlflow_metrics({"timing/iteration": elapsed_time_per_iteration}), step=iteration
+                )
             if comet_logger:
-                comet_logger.log_metrics({"iteration-time": elapsed_time_per_iteration}, step=iteration)
+                comet_logger.log_metrics({"timing/iteration": elapsed_time_per_iteration}, step=iteration)
 
         log_string = f" [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]"
         log_string += " iteration {:8d}/{:8d} |".format(iteration, train_config.train_iters)

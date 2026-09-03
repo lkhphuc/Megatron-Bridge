@@ -615,8 +615,8 @@ class TestTrainingLog:
             model=None,
         )
 
-        mlflow_logger.log_metrics.assert_any_call({"forward-backward-time": 6.0}, step=1)
-        comet_logger.log_metrics.assert_any_call({"forward-backward-time": 6.0}, step=1)
+        mlflow_logger.log_metrics.assert_any_call({"timing_forward-backward": 6.0}, step=1)
+        comet_logger.log_metrics.assert_any_call({"timing/forward-backward": 6.0}, step=1)
         assert timers.samples == {}
 
     @mock.patch("megatron.bridge.training.utils.train_utils.get_num_microbatches")

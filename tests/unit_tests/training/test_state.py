@@ -1055,10 +1055,10 @@ class TestTimersWriteToMlflow:
         mock_mlflow.log_metrics.assert_called_once()
         call_args = mock_mlflow.log_metrics.call_args
         metrics = call_args[0][0]
-        assert "forward-time" in metrics
-        assert "backward-time" in metrics
-        assert metrics["forward-time"] == 0.5
-        assert metrics["backward-time"] == 0.8
+        assert "timing_forward" in metrics
+        assert "timing_backward" in metrics
+        assert metrics["timing_forward"] == 0.5
+        assert metrics["timing_backward"] == 0.8
         assert call_args[1]["step"] == 100
 
     def test_sanitizes_metric_names(self):
@@ -1079,8 +1079,8 @@ class TestTimersWriteToMlflow:
 
         call_args = mock_mlflow.log_metrics.call_args
         metrics = call_args[0][0]
-        assert "train_forward-time" in metrics
-        assert "train_backward_compute-time" in metrics
+        assert "timing_train_forward" in metrics
+        assert "timing_train_backward_compute" in metrics
 
     def test_noop_when_logger_is_none(self):
         """Test that no error is raised when logger is None."""
@@ -1258,10 +1258,10 @@ class TestTimersWriteToComet:
         mock_comet.log_metrics.assert_called_once()
         call_args = mock_comet.log_metrics.call_args
         metrics = call_args[0][0]
-        assert "forward-time" in metrics
-        assert "backward-time" in metrics
-        assert metrics["forward-time"] == 0.5
-        assert metrics["backward-time"] == 0.8
+        assert "timing/forward" in metrics
+        assert "timing/backward" in metrics
+        assert metrics["timing/forward"] == 0.5
+        assert metrics["timing/backward"] == 0.8
         assert call_args[1]["step"] == 100
 
     def test_preserves_slash_in_metric_names(self):
@@ -1282,8 +1282,8 @@ class TestTimersWriteToComet:
 
         call_args = mock_comet.log_metrics.call_args
         metrics = call_args[0][0]
-        assert "train/forward-time" in metrics
-        assert "train/backward/compute-time" in metrics
+        assert "timing/train/forward" in metrics
+        assert "timing/train/backward/compute" in metrics
 
     def test_noop_when_logger_is_none(self):
         """Test that no error is raised when logger is None."""
