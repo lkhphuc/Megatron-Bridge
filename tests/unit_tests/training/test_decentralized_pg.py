@@ -29,6 +29,13 @@ import pytest
 from megatron.bridge.training.config import DistributedInitConfig
 
 
+def _attach_gtp_init_mp_signature(mock_parallel_state: MagicMock) -> None:
+    """Give the mocked initialize_model_parallel a GTP-aware signature for inspect()."""
+    mock_parallel_state.initialize_model_parallel.__signature__ = inspect.signature(
+        lambda *, gtp_remat_size=1, expert_gtp_remat_size=1, **kwargs: None
+    )
+
+
 class TestDistributedInitConfigDecentralizedPg:
     """Tests for DistributedInitConfig.use_decentralized_pg configuration."""
 

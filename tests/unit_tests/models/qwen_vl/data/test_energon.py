@@ -469,7 +469,9 @@ class TestQwenVLTaskEncoderNativePacking(unittest.TestCase):
         source_samples = [self._sample("nine-a", 9, 9), self._sample("nine-b", 9, 9)]
         packed_sample = self.encoder.pack_selected_samples(source_samples)
 
-        with self.assertRaisesRegex(ValueError, "group length 24 exceeds seq_length=12"):
+        # SkipSample (not ValueError): free under packing failure handler; avoids
+        # burning the consecutive-failure budget and dumping the pack.
+        with self.assertRaises(SkipSample):
             self.encoder.batch([packed_sample])
 
     def test_encode_sample_preserves_restore_key_without_buffering_raw_media(self):

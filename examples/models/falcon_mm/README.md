@@ -3,86 +3,209 @@
 Terse reference for the Falcon-MM Energon data plane (web-document pretraining
 style, native THD packing). Code: `src/megatron/bridge/models/falcon_mm/data/`.
 
-## Sample sources → sample types
+## Sample sources → cookers
 
-| Source | On-disk format | Energon loader | Sample type |
-| --- | --- | --- | --- |
-| MINT-1T-ArXiv interleaved docs | original tars, `<key>.json` + `<key>.tiff` (multi-page) | `MintInterleavedWebdataset` (`mint_webdataset.py`), indexed in place | Energon standard `InterleavedSample(sequence)` |
-| Text-only docs (fineweb) | `{"text": ...}` JSONL + `.idx` | Energon built-in `DefaultCrudeJsonlDatasetFactory` | `CrudeSample` dict |
-| Legacy ChatML (mock) | `conversation.json` (+ media) webdataset | `ChatMLWebdataset` | `ChatMLSample` (pass-through to Qwen encoder) |
 
-MINT sample schema (`<key>.json`): `{"texts": [...], "images": [...], "captions": [...]}`;
-`texts`/`images` are parallel lists, a non-None `images[i]` means an image sits after
-`texts[i]`; the k-th non-None image = tiff page k = `captions[k]`. The loader's
-`mint_interleaved_sample_loader` normalizes this into `InterleavedSample.sequence`:
-`str` text parts (segments and captions) and `[C,H,W]` float image tensors in
-document order.
+| Source              | On-disk format                              | Energon loader                  | `subflavors.crude_type` | Cooker                  |
+| ------------------- | ------------------------------------------- | ------------------------------- | ----------------------- | ----------------------- |
+| MINT-1T-ArXiv       | tar webdataset: `<key>.json` + `<key>.tiff` | `CrudeWebdataset`               | `mint`                  | `cook_mint_interleaved` |
+| Text-only (FineWeb) | JSONL lines `{"text": "..."}`               | crude JSONL / `CrudeWebdataset` | `text`                  | `cook_text_document`    |
+| ChatML (mock)       | `conversation.json` (+ media)               | `ChatMLWebdataset`              | —                       | Qwen ChatML path        |
 
-## Encoder contract (`FalconTaskEncoder`, document path)
 
-- Assembly: walk `sequence`; text parts verbatim, each image part →
-  `<|vision_start|><|image_pad|><|vision_end|>`; blocks joined with `\n`; documents are
-  never truncated.
-- One processor call per sample (`min_pixels`/`max_pixels` bounds); all markers are kept,
-  so the images list always matches the markers one-to-one.
-- Row contract (`QwenVLPreparedSequence`): `input_ids`, `position_ids` (arange),
-  `labels` = shift-left with `-100` on skipped/visual token ids, `loss_mask` =
-  `labels != -100` (pretraining — full LM loss on every real-token target; ignored
-  positions are excluded from both the loss numerator and the per-token denominator),
-  `visual_values` over `QWEN_VISUAL_KEYS` with flattened grids. No `attention_mask`
-  key — THD-only path: the pack carries per-segment causal structure in `cu_seqlens`
-  and emits `attention_mask=None`; an all-ones mask would be dropped by the packer
-  and a non-trivial one rejected, so the row omits it explicitly.
-- Guards (all `SkipSample`, warnings rate-limited to the first 32 per worker): images >
-  `max_num_images` (10), visual tokens > `max_visual_tokens` (16384), aligned length >
-  `seq_length` — checked after processor tokenization, i.e. on the exact expanded token
-  count (visual tokens included).
-- Packing: inherited Qwen hooks (per-worker FFD over `packing_buffer_size` candidates);
-  physical MBS=1; `calculate_per_token_loss=True`, `ddp.average_in_collective=False`.
-- Encoder construction is polymorphic: `build_energon_task_encoder` calls
-  `task_config.build_task_encoder(...)`; `FalconEnergonTaskEncoderConfig` overrides it.
+`energon prepare` does **not** prompt for subflavors. After prepare, edit
+`.nv-meta/dataset.yaml` (or set `subflavors` on a Metadataset blend entry).
 
-## Reproduce the current mixture
+MINT json schema: `{"texts": [...], "images": [...], "captions": [...]}` —
+parallel `texts`/`images`; non-`None` `images[i]` means tiff page *k* (and
+`captions[k]`) follows `texts[i]`. The cooker builds
+`FalconDocumentSample.sequence` with text strings and header-only
+`ImagePageRef`s (no pixel decode at load).
 
-```bash
-# 1. MINT tars (2 shards) — used as-is
-hf download mlfoundations/MINT-1T-ArXiv --repo-type dataset \
-  --include "arXiv_src_0001_001_wds.tar" --include "arXiv_src_0002_001_wds.tar" \
-  --local-dir workspace/data/mint1t_arxiv/raw
+Per-source image budgets (area = H×W, not edge length) live in `subflavors`.
+Encoder defaults use early-fusion patchify
+(`patch_size=32`, `spatial_merge_size=1`, `temporal_patch_size=1`,
+`min_pixels = patch_size**2 * merge_size = 1024`) so tiny pages are not
+aggressively upscaled. Raising `min_pixels` **upscales** small images — it
+does **not** drop them. To filter out unusable tiny media, do it per source
+(omit the source, or add a source-specific skip), not via a large global
+`min_pixels`.
 
-# 2. Index in place (writes .idx + .nv-meta only; train=0001, val=0002)
-uv run python examples/models/falcon_mm/prepare_mint_index.py   # → 312 train / 382 val docs
-
-# 3. Text-only fineweb docs (450 train / 50 val) + Energon JSONL index
-uv run python - <<'EOF'
-import json
-from datasets import load_dataset
-from megatron.energon.flavors.jsonl.jsonl_prepare import JsonlPreparator
-
-docs = (d["text"][:12000] for d in load_dataset(
-    "HuggingFaceFW/fineweb", "sample-10BT", split="train", streaming=True))
-docs = [t for t in docs if len(t.strip()) >= 200][:500]
-for name, rows in (("train", docs[:450]), ("val", docs[450:])):
-    path = f"workspace/data/text_web/{name}.jsonl"
-    with open(path, "w") as f:
-        for t in rows:
-            f.write(json.dumps({"text": t}) + "\n")
-    JsonlPreparator.prepare_dataset(path)
-EOF
-
-# 4. Mixture YAML: workspace/data/falcon_pretrain_mixture.yaml
-#    (blend_epochized; MINT x2 + text x1 ≈ 58/42; container paths /opt/Megatron-Bridge/...)
-
-# 5. Train (defaults point at the mixture)
-bash examples/models/falcon_mm/sft_energon.sh
+```yaml
+subflavors:
+  crude_type: mint
+  max_pixels: 1048576   # ~1024×1024 cap (downscale)
+  # min_pixels: 1024    # optional; omit to use Falcon encoder default
+  max_num_images: 10
 ```
 
-## Todo: parquet input (fineweb native format)
 
-- Large-scale pretraining text-only dataset like fineweb releases in parquet format, which is currently not supported.
-  This is why we convert it to lightweight jsonl. In the future Energon 8, it will be supported by default.
-- Energon support Primary & Auxiliary datasets, where the media can stay on separate auxiliary dataset and be shared
-  with other primary datasets. We should really be looking into using this (e.g download OmniCorpus image separately, 
-  build caption/interleave separately)
-- Use Energon media files's metadata and cache pool.
-- Skip dataloader process on non-first PP rank or skip heavy media processing on other ranks at least.
+
+## 1. Prepare MINT-1T-ArXiv
+
+```bash
+# Download (full dump; use --include to pull a subset of tars if needed)
+hf download --repo-type dataset mlfoundations/MINT-1T-ArXiv \
+  --local-dir /mnt/datasets/MINT-1T-arxiv
+
+# Index in place. Choose: 11. Crude sample (plain dict for cooking)
+energon prepare /mnt/datasets/MINT-1T-arxiv
+```
+
+Then edit `/mnt/datasets/MINT-1T-arxiv/.nv-meta/dataset.yaml` from the stub
+Energon wrote to:
+
+```yaml
+__module__: megatron.energon
+__class__: CrudeWebdataset
+subflavors:
+  crude_type: mint
+  max_pixels: 1048576
+```
+
+
+
+## 2. Prepare FineWeb text (parquet → JSONL)
+
+Energon does not load FineWeb parquet natively yet; convert each parquet to
+JSONL with a string `"text"` field, then prepare.
+
+JSONL indexing is **one** `.jsonl` **file → one sibling** `.jsonl.idx`. There is no
+“prepare this folder of JSONLs” command. Prefer concatenating shards into one
+file for a single text source; or prepare each shard and blend paths in a
+Metadataset.
+
+```bash
+# Example: small FineWeb sample dump
+hf download --repo-type dataset HuggingFaceFW/fineweb \
+  --include "sample/10BT/*" \
+  --local-dir /mnt/datasets/fineweb/sample-10BT
+
+# Convert every parquet under the download to {"text": ...} JSONL shards
+mkdir -p /mnt/datasets/fineweb/sample-10BT-jsonl
+uv run python - <<'EOF'
+from pathlib import Path
+import json
+import pyarrow.parquet as pq
+
+src = Path("/mnt/datasets/fineweb/sample-10BT")
+dst = Path("/mnt/datasets/fineweb/sample-10BT-jsonl")
+dst.mkdir(parents=True, exist_ok=True)
+for parquet_path in sorted(src.rglob("*.parquet")):
+    out = dst / (parquet_path.stem + ".jsonl")
+    table = pq.read_table(parquet_path, columns=["text"])
+    with out.open("w", encoding="utf-8") as f:
+        for text in table.column("text").to_pylist():
+            if not isinstance(text, str):
+                continue
+            f.write(json.dumps({"text": text}, ensure_ascii=False) + "\n")
+    print(f"wrote {out}")
+EOF
+
+# Option A (recommended): concat shards, then prepare the single file.
+cat /mnt/datasets/fineweb/sample-10BT-jsonl/*.jsonl \
+  > /mnt/datasets/fineweb/sample-10BT-all.jsonl
+energon prepare /mnt/datasets/fineweb/sample-10BT-all.jsonl
+# → creates /mnt/datasets/fineweb/sample-10BT-all.jsonl.idx
+
+# Option B: index every shard without concatenating (then blend in YAML).
+# for f in /mnt/datasets/fineweb/sample-10BT-jsonl/*.jsonl; do
+#   uv run python -c "from megatron.energon.flavors.jsonl.jsonl_prepare import JsonlPreparator as P; \
+#     print('$f', P.prepare_dataset('$f'))"
+# done
+```
+
+JSONL prepare does **not** create `.nv-meta/dataset.yaml` — only the `.idx`.
+Put `crude_type: text` on the Metadataset blend entry. Mixture `path` must be
+the `.jsonl` **file** (Option A) or each shard path (Option B), not the folder.
+
+## 3. Sample Metadataset mixture
+
+Save as e.g. `/mnt/datasets/falcon_pretrain_mixture.yaml` and point training at
+it with `dataset.path=/mnt/datasets/falcon_pretrain_mixture.yaml`.
+
+Blend-entry `subflavors` merge with (and override) each dataset’s
+`.nv-meta/dataset.yaml`, so you can keep dataset yamls minimal and put
+`crude_type` / `max_pixels` only here if you prefer.
+
+```yaml
+__module__: megatron.energon
+__class__: MetadatasetV2
+splits:
+  train:
+    blend:
+      - weight: 2.0
+        path: /mnt/datasets/MINT-1T-arxiv
+        subflavors:
+          crude_type: mint
+          max_pixels: 1048576
+      - weight: 1.0
+        path: /mnt/datasets/fineweb/sample-10BT-all.jsonl
+        subflavors:
+          crude_type: text
+  val:
+    blend:
+      - weight: 1.0
+        path: /mnt/datasets/MINT-1T-arxiv
+        split_part: val
+        subflavors:
+          crude_type: mint
+          max_pixels: 1048576
+      - weight: 1.0
+        path: /mnt/datasets/fineweb/sample-10BT-all.jsonl
+        subflavors:
+          crude_type: text
+```
+
+Train (example):
+
+```bash
+ENERGON_PATH=/mnt/datasets/falcon_pretrain_mixture.yaml \
+  bash examples/models/falcon_mm/thd_energon.sh
+```
+
+
+
+## Encoder contract (`FalconTaskEncoder`)
+
+**Pack-then-decode** (crude → cooker → preencode → pack → postencode):
+
+1. `preencode_sample` — assemble markers, estimate exact length from text +
+  image headers, record per-page smart-resize targets → `FalconPendingSample`
+  (no HF processor / no `pixel_values`).
+2. `select_samples_to_pack` — FFD on exact preencode `packing_length`.
+3. `postencode_sample` — decode `ImagePageRef` to the preencode smart-resize
+  targets (so the processor's own resize is a no-op and lengths match by
+  construction), run the processor, build `QwenVLPreparedSequence`.
+
+- Document assembly: text verbatim; each image →
+`<|vision_start|><|image_pad|><|vision_end|>`; blocks joined with `\n`.
+- Visual markers are trunk-unified (see `data/visual_markers.py`): every
+  image span is `[vision_start][image_pad × N][vision_end]` with single
+  special tokens as markers. Qwen uses its native triple; the DSv4 trunk maps
+  them to the reserved placeholders `<｜place▁holder▁no▁1｜>` /
+  `<｜place▁holder▁no▁0｜>` / `<｜place▁holder▁no▁2｜>` (ids 128001 / 128000 /
+  128002); `image_pad` (128000) is the model-side scatter target
+  (`FalconDeepseekv4Provider.image_token_id`).
+- Row: `input_ids`, `position_ids`, `labels` (shift-left, `-100` on skipped /
+visual ids), `loss_mask`, `visual_values`. No `attention_mask` (THD /
+`cu_seqlens` only).
+- Guards (`SkipSample`): `max_num_images`, `max_visual_tokens`, length >
+`seq_length`, `DecompressionBombError`.
+- Recipe dataset defaults (`recipes/falcon_mm/dataset.py`):
+`packing_buffer_size=16` (enables THD packing); Energon-required
+`shuffle_buffer_size=100` and `max_samples_per_sequence=100` (shuffle vs
+sequential-read tradeoff — set explicitly, no Energon API default).
+Pack-then-decode keeps the shuffle buffer cheap, so these are not RAM
+panic valves; override via CLI / `make_falcon_energon_dataset(...)` when
+sample size differs a lot from typical MINT pages.
+
+
+
+## Todo
+
+- Native parquet / Energon 8 (drop FineWeb JSONL conversion).
+- Primary + Auxiliary datasets (shared media, separate caption/interleave).
+- Energon media metadata + cache pool.
+- Skip heavy media work on non-first PP ranks.
+

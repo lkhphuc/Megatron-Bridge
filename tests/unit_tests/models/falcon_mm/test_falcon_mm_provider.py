@@ -89,8 +89,11 @@ class TestFalconQwen35ModelProvider:
             "patch_size",
         ):
             assert getattr(falcon, field_name) == getattr(source, field_name), field_name
-        # vision_config carries the patch geometry for the patch embed; shared by reference.
+        # Falcon default is 1 (no single-image temporal duplication); still overrideable.
+        assert source.temporal_patch_size == 2
+        assert falcon.temporal_patch_size == 1
         assert falcon.vision_config is source.vision_config
+        assert falcon.vision_config.temporal_patch_size == falcon.temporal_patch_size
         # GDN hybrid defaults flow through unchanged.
         assert falcon.experimental_attention_variant == "gated_delta_net"
         assert falcon.linear_attention_freq == 4

@@ -30,17 +30,17 @@ Text is tokenized with the real DeepSeek-V4 tokenizer
 
 import torch
 
-from megatron.bridge.data.builders.energon import EnergonDatasetConfig
 from megatron.bridge.models.falcon_mm import FalconDeepseekv4ModelProvider
 from megatron.bridge.models.falcon_mm.data import FalconDeepseekv4EnergonTaskEncoderConfig
 from megatron.bridge.recipes.common import _pretrain_common
+from megatron.bridge.recipes.falcon_mm.dataset import make_falcon_energon_dataset
 from megatron.bridge.recipes.utils.environment_utils import COMMON_RECIPE_ENV_VARS
 from megatron.bridge.recipes.utils.optimizer_utils import distributed_fused_adam_with_cosine_annealing
 from megatron.bridge.training.comm_overlap import CommOverlapConfig
 from megatron.bridge.training.config import ConfigContainer
 
 
-_DSV4_TOKENIZER_PATH = "FALCON_MM_AGENT_NOTES/assets/DeepSeek-V4-Flash"
+_DSV4_TOKENIZER_PATH = "deepseek-ai/DeepSeek-V4-Flash-Base"
 
 # 12-layer mock: window, window, then alternating CSA(4) / HCA(128).
 _MOCK_COMPRESS_RATIOS = [0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128]
@@ -52,19 +52,12 @@ __all__ = [
 ]
 
 
-def _make_falcon_dsv4_energon_dataset(seq_length: int, micro_batch_size: int) -> EnergonDatasetConfig:
-    """Create the Energon dataset config for Falcon DSv4 (THD Energon-native packing only).
-
-    ``path`` is intentionally None — point it at an indexed Energon dataset
-    root or a MetadatasetV2 YAML mixture via CLI: ``dataset.path=<path>``.
-    """
-    return EnergonDatasetConfig(
-        path=None,
+def _make_falcon_dsv4_energon_dataset(seq_length: int, micro_batch_size: int):
+    """DSv4 Falcon Energon dataset (shared packing defaults)."""
+    return make_falcon_energon_dataset(
+        FalconDeepseekv4EnergonTaskEncoderConfig(ds_tokenizer_path=_DSV4_TOKENIZER_PATH),
         seq_length=seq_length,
         micro_batch_size=micro_batch_size,
-        num_workers=2,
-        packing_buffer_size=16,
-        task_encoder=FalconDeepseekv4EnergonTaskEncoderConfig(ds_tokenizer_path=_DSV4_TOKENIZER_PATH),
     )
 
 
@@ -152,7 +145,9 @@ def _falcon_deepseekv4_mock_2b6_provider() -> FalconDeepseekv4ModelProvider:
 
 def _apply_falcon_dsv4_energon_runtime(cfg: ConfigContainer, *, max_lr: float, min_lr: float) -> None:
     """Apply shared Energon-packing pretrain runtime knobs for Falcon DSv4."""
-    cfg.checkpoint.save_interval = 100
+    cfg.checkpoint.save_interval = 5000
+    # Overlap checkpoint I/O with training (torch_dist + persistent worker).
+    cfg.checkpoint.async_save = True
 
     cfg.model.transformer_impl = "transformer_engine"
     cfg.model.cuda_graph_impl = "none"
@@ -181,8 +176,8 @@ def _apply_falcon_dsv4_energon_runtime(cfg: ConfigContainer, *, max_lr: float, m
 
     # Optimizer
     opt_cfg, scheduler_cfg = distributed_fused_adam_with_cosine_annealing(
-        lr_warmup_iters=20,
-        lr_decay_iters=1000,
+        lr_warmup_iters=100,
+        lr_decay_iters=None,
         max_lr=max_lr,
         min_lr=min_lr,
     )
@@ -269,7 +264,7 @@ def falcon_deepseekv4_mock_2b6_pretrain_8gpu_h100_bf16_config() -> ConfigContain
     launcher. Point ``dataset.path`` at the Energon mixture.
     """
     cfg = _falcon_deepseekv4_mock_2b6_pretrain_base()
-    cfg.model.expert_model_parallel_size = 2
+    cfg.model.expert_model_parallel_size = 4
     return cfg
 
 

@@ -34,7 +34,6 @@ _TRUSTED_DATASET_FACTORY_MODULE_PREFIXES = (
 _TRUSTED_DATASET_FACTORY_MODULE_ALIASES = frozenset(
     {
         "megatron.bridge.models.qwen_vl.data.energon",
-        "megatron.bridge.models.falcon_mm.data.mint_webdataset",
     }
 )
 _energon_factory_init = getattr(

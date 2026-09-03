@@ -65,14 +65,19 @@ class FalconDeepseekv4ModelProvider(MLATransformerConfig, HybridModelProvider):
 
     The placeholder defaults to the DSv4 reserved special token
     ``<｜place▁holder▁no▁0｜>`` (id 128000), which exists in the released
-    129280-token vocabulary, so no vocab extension is needed.
+    129280-token vocabulary, so no vocab extension is needed. The data plane
+    brackets each visual span with ``<｜place▁holder▁no▁1｜>`` /
+    ``<｜place▁holder▁no▁2｜>`` as vision start/end markers — see
+    ``data/visual_markers.py`` for the shared marker contract; this id is the
+    scatter target (``image_pad``) and must stay aligned with the resolved
+    ``image_pad_id`` there.
 
     Attributes:
         image_token_id: Placeholder token id whose positions receive the
             patch embeddings.
         patch_size: Spatial patch edge for the Conv3d patchify.
-        temporal_patch_size: Temporal patch size (images are duplicated to
-            fill it, same as the Qwen path).
+        temporal_patch_size: Temporal patch size for Conv3d patchify
+            (Falcon early-fusion default is 1; no frame duplication).
         in_channels: Image channels.
         spatial_merge_size: Spatial merge factor of the patch merger; one
             visual token covers merge² patches.
@@ -83,10 +88,10 @@ class FalconDeepseekv4ModelProvider(MLATransformerConfig, HybridModelProvider):
 
     # Falcon multimodal surface
     image_token_id: int = 128000
-    patch_size: int = 16
-    temporal_patch_size: int = 2
+    patch_size: int = 32
+    temporal_patch_size: int = 1
     in_channels: int = 3
-    spatial_merge_size: int = 2
+    spatial_merge_size: int = 1
     patch_embed_hidden_size: int = 1024
 
     # DSv4 architecture constants (mirror deepseek_v4_bridge.provider_bridge)

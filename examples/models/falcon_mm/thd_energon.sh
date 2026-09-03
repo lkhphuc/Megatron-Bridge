@@ -26,15 +26,19 @@
 set -euo pipefail
 
 export OMP_NUM_THREADS=8
-WORKSPACE=${WORKSPACE:-/opt/Megatron-Bridge/workspace}
-ENERGON_PATH="${ENERGON_PATH:-${WORKSPACE}/data/falcon_pretrain_mixture.yaml}"
-PRETRAINED_CHECKPOINT=${PRETRAINED_CHECKPOINT:-${WORKSPACE}/models/Qwen/Qwen3.5-2B/}
+export NCCL_DEBUG=WARN
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+WORKSPACE=${WORKSPACE:-~/phuc}
+ENERGON_PATH=${ENERGON_PATH:-${WORKSPACE}/Megatron-Bridge/examples/models/falcon_mm/pretrain_mixture.yaml}
+PRETRAINED_CHECKPOINT=${PRETRAINED_CHECKPOINT:-null}
+LOAD_CHECKPOINT=${LOAD_CHECKPOINT:-null}
 OUTPUT_DIR=${OUTPUT_DIR:-${WORKSPACE}/results/falcon_mm_2b_sft}
 RECIPE=${RECIPE:-falcon_deepseekv4_mock_2b6_pretrain_8gpu_h100_bf16_config}
 NUM_GPUS=${NUM_GPUS:-8}
-SEQ_LENGTH=${SEQ_LENGTH:-4096}
+SEQ_LENGTH=${SEQ_LENGTH:-8192}
 TRAIN_ITERS=${TRAIN_ITERS:-10000}
-GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-8}
+GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-16}
 EVAL_ITERS=${EVAL_ITERS:-1}
 EVAL_INTERVAL=${EVAL_INTERVAL:-20000}
 PACKING_BUFFER_SIZE=${PACKING_BUFFER_SIZE:-16}
@@ -63,7 +67,7 @@ uv run python -m torch.distributed.run --standalone --nproc_per_node="${NUM_GPUS
   --recipe "${RECIPE}" \
   --step_func vlm_step \
   checkpoint.pretrained_checkpoint="${PRETRAINED_CHECKPOINT}" \
-  checkpoint.load=null \
+  checkpoint.load="${LOAD_CHECKPOINT}" \
   checkpoint.save="${OUTPUT_DIR}/checkpoints" \
   train.train_iters="${TRAIN_ITERS}" \
   train.global_batch_size="${GLOBAL_BATCH_SIZE}" \
@@ -79,7 +83,7 @@ uv run python -m torch.distributed.run --standalone --nproc_per_node="${NUM_GPUS
   dataset.micro_batch_size="${MBS}" \
   dataset.seq_length="${SEQ_LENGTH}" \
   dataset.packing_buffer_size="${PACKING_BUFFER_SIZE}" \
-  dataset.num_workers=8 \
+  dataset.num_workers=2 \
   optimizer.lr=1e-4 \
   scheduler.lr_warmup_iters=100 \
   logger.log_interval=1 \

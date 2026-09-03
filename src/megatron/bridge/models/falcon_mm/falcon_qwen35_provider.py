@@ -17,6 +17,7 @@
 from dataclasses import dataclass, fields
 from typing import ClassVar
 
+from megatron.bridge.models.falcon_mm.data.cookers import FALCON_DEFAULT_TEMPORAL_PATCH_SIZE
 from megatron.bridge.models.falcon_mm.modelling_falcon_mm import FalconQwen35Model
 from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.model import Qwen3VLModel
 from megatron.bridge.models.qwen_vl.qwen35_vl_provider import (
@@ -39,6 +40,7 @@ class FalconQwen35ModelProvider(Qwen35VLModelProvider):
     """
 
     MODEL_CLASS: ClassVar[type[Qwen3VLModel] | None] = FalconQwen35Model
+    temporal_patch_size: int = FALCON_DEFAULT_TEMPORAL_PATCH_SIZE
 
 
 @dataclass
@@ -46,6 +48,7 @@ class FalconQwen35MoEModelProvider(Qwen35VLMoEModelProvider):
     """Provider for encoder-free Falcon multimodal MoE (Qwen3.5 MoE trunk)."""
 
     MODEL_CLASS: ClassVar[type[Qwen3VLModel] | None] = FalconQwen35Model
+    temporal_patch_size: int = FALCON_DEFAULT_TEMPORAL_PATCH_SIZE
 
 
 def falcon_qwen35_provider_from_qwen35_vl(
@@ -59,6 +62,12 @@ def falcon_qwen35_provider_from_qwen35_vl(
     LM/vision architecture fields, which are copied by reference into an
     equivalent Falcon-MM provider. MoE trunks return
     :class:`FalconQwen35MoEModelProvider`.
+
+    ``temporal_patch_size`` keeps the Falcon provider default (1) rather than
+    the HF Qwen3.5-VL value (2), so single-image samples are not duplicated
+    into two identical temporal frames unless the caller sets it. Whatever
+    value is used, ``vision_config.temporal_patch_size`` is aligned to the
+    provider so the patch embed matches the dataloader.
     """
     target_cls: type[FalconQwen35ModelProvider | FalconQwen35MoEModelProvider]
     if isinstance(provider, Qwen35VLMoEModelProvider):
@@ -70,4 +79,9 @@ def falcon_qwen35_provider_from_qwen35_vl(
         for field in fields(target_cls)
         if field.init and hasattr(provider, field.name)
     }
-    return target_cls(**init_kwargs)
+    # Keep Falcon's default (1); HF Qwen VL typically brings 2.
+    init_kwargs.pop("temporal_patch_size", None)
+    falcon = target_cls(**init_kwargs)
+    if falcon.vision_config is not None:
+        falcon.vision_config.temporal_patch_size = falcon.temporal_patch_size
+    return falcon

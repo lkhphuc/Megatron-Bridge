@@ -69,9 +69,9 @@ class TestFalconDeepseekv4ModelProvider:
     def test_falcon_surface_defaults(self):
         provider = _minimal_dsv4_provider()
         assert provider.image_token_id == 128000
-        assert provider.patch_size == 16
-        assert provider.temporal_patch_size == 2
-        assert provider.spatial_merge_size == 2
+        assert provider.patch_size == 32
+        assert provider.temporal_patch_size == 1
+        assert provider.spatial_merge_size == 1
         assert provider.in_channels == 3
         assert provider.patch_embed_hidden_size == 1024
 

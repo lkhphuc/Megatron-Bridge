@@ -20,11 +20,13 @@ from typing import Any
 
 import torch
 
-
-# Must match ``energon.FALCON_IMAGE_MARKER`` — interleaved assembly inserts this per image.
-_FALCON_IMAGE_MARKER = "<|vision_start|><|image_pad|><|vision_end|>"
-
-FALCON_DS_IMAGE_TOKEN = "<｜place▁holder▁no▁0｜>"
+from megatron.bridge.models.falcon_mm.data.visual_markers import (
+    FALCON_IMAGE_MARKER as _FALCON_IMAGE_MARKER,
+)
+from megatron.bridge.models.falcon_mm.data.visual_markers import (
+    VisualMarkerIds,
+    resolve_dsv4_marker_ids,
+)
 
 
 class FalconDeepseekv4Processor:
@@ -33,7 +35,9 @@ class FalconDeepseekv4Processor:
     Document text arrives with one ``FALCON_IMAGE_MARKER`` block per image
     (same assembly contract as the Qwen Falcon-MM path). Text segments are
     tokenized with ``add_special_tokens=False``; each marker is expanded into
-    ``image_token_id`` repeated ``prod(grid) // spatial_merge_size**2`` times.
+    the same triple the Qwen processor emits natively:
+    ``[vision_start_id] + [image_pad_id] * (prod(grid) // spatial_merge_size**2)
+    + [vision_end_id]``.
     """
 
     def __init__(
@@ -41,7 +45,7 @@ class FalconDeepseekv4Processor:
         tokenizer: Any,
         image_processor: Any,
         *,
-        spatial_merge_size: int = 2,
+        spatial_merge_size: int = 1,
     ) -> None:
         """Initialize the processor shim.
 
@@ -54,14 +58,12 @@ class FalconDeepseekv4Processor:
         self.image_processor = image_processor
         self.spatial_merge_size = spatial_merge_size
 
-        image_token_id = tokenizer.convert_tokens_to_ids(FALCON_DS_IMAGE_TOKEN)
-        unk_token_id = getattr(tokenizer, "unk_token_id", None)
-        if image_token_id is None or (unk_token_id is not None and image_token_id == unk_token_id):
-            raise ValueError(
-                f"Tokenizer must define reserved image placeholder {FALCON_DS_IMAGE_TOKEN!r}; "
-                f"got token id {image_token_id!r}."
-            )
-        self.image_token_id = image_token_id
+        self.marker_ids: VisualMarkerIds = resolve_dsv4_marker_ids(tokenizer)
+
+    @property
+    def image_token_id(self) -> int:
+        """Placeholder id whose positions receive scattered patch embeddings."""
+        return self.marker_ids.image_pad_id
 
     def __call__(
         self,
@@ -126,6 +128,9 @@ class FalconDeepseekv4Processor:
             image_grids = visual_output["image_grid_thw"]
 
         merge_factor = self.spatial_merge_size**2
+        start_id = self.marker_ids.vision_start_id
+        pad_id = self.marker_ids.image_pad_id
+        end_id = self.marker_ids.vision_end_id
         token_segments: list[torch.Tensor] = []
         for index, part in enumerate(text_parts):
             if part:
@@ -135,7 +140,15 @@ class FalconDeepseekv4Processor:
                 assert image_grids is not None
                 grid = image_grids[index]
                 num_visual_tokens = int(grid.prod().item()) // merge_factor
-                token_segments.append(torch.full((num_visual_tokens,), self.image_token_id, dtype=torch.long))
+                token_segments.append(
+                    torch.cat(
+                        [
+                            torch.tensor([start_id], dtype=torch.long),
+                            torch.full((num_visual_tokens,), pad_id, dtype=torch.long),
+                            torch.tensor([end_id], dtype=torch.long),
+                        ]
+                    )
+                )
 
         input_ids = torch.cat(token_segments).unsqueeze(0)
         result: dict[str, torch.Tensor] = {"input_ids": input_ids}

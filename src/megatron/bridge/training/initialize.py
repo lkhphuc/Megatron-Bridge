@@ -803,7 +803,7 @@ def _initialize_distributed(
             print("model parallel is already initialized")
         else:
             # Guard for main/dev branch submodule compatibility while Bridge pins
-            # MCore commits across the Dynamic CP rename.
+            # MCore commits across the Dynamic CP rename and GTP availability.
             _init_mp_params = set(inspect.signature(parallel_state.initialize_model_parallel).parameters)
             _optional_kwargs = {}
             if "dynamic_context_parallel" in _init_mp_params and hasattr(model_config, "dynamic_context_parallel"):

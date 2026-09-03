@@ -1,0 +1,32 @@
+# Sample Falcon-MM pretrain mixture (MINT + FineWeb text).
+# Point training at this file: dataset.path=<this yaml>
+#
+# MINT: CrudeWebdataset dir with .nv-meta (crude_type can live here or in .nv-meta).
+# FineWeb: path must be a prepared *.jsonl file (sibling *.jsonl.idx), not a folder.
+
+__module__: megatron.energon
+__class__: MetadatasetV2
+splits:
+  train:
+    blend:
+      - weight: 1.0
+        path: /mnt/datasets/MINT-1T-arxiv
+        subflavors:
+          crude_type: mint
+          max_pixels: 1048576
+      - weight: 1.0
+        path: /mnt/datasets/fineweb/sample-10BT-all.jsonl
+        subflavors:
+          crude_type: text
+  val:
+    blend:
+      - weight: 1.0
+        path: /mnt/datasets/MINT-1T-arxiv
+        split_part: val
+        subflavors:
+          crude_type: mint
+          max_pixels: 1048576
+      # - weight: 1.0
+      #   path: /mnt/datasets/fineweb/sample-10BT-all.jsonl
+      #   subflavors:
+      #     crude_type: text

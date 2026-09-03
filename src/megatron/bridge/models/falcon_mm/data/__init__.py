@@ -12,17 +12,47 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from megatron.bridge.models.falcon_mm.data.cookers import (
+    FALCON_CRUDE_TYPE_KEY,
+    FALCON_CRUDE_TYPE_MINT,
+    FALCON_CRUDE_TYPE_TEXT,
+    FALCON_DEFAULT_MIN_PIXELS,
+    FALCON_DEFAULT_PATCH_SIZE,
+    FALCON_DEFAULT_SPATIAL_MERGE_SIZE,
+    FALCON_DEFAULT_TEMPORAL_PATCH_SIZE,
+    FalconDocumentSample,
+    FalconPendingSample,
+    cook_mint_interleaved,
+    cook_text_document,
+)
 from megatron.bridge.models.falcon_mm.data.energon import (
     FalconDeepseekv4EnergonTaskEncoderConfig,
-    FalconDeepseekv4TaskEncoder,
     FalconEnergonTaskEncoderConfig,
     FalconTaskEncoder,
+)
+from megatron.bridge.models.falcon_mm.data.visual_markers import (
+    FALCON_IMAGE_MARKER,
+    IMAGE_MARKER_OVERHEAD_TOKENS,
+    VisualMarkerIds,
 )
 
 
 __all__ = [
+    "FALCON_CRUDE_TYPE_KEY",
+    "FALCON_CRUDE_TYPE_MINT",
+    "FALCON_CRUDE_TYPE_TEXT",
+    "FALCON_DEFAULT_MIN_PIXELS",
+    "FALCON_DEFAULT_PATCH_SIZE",
+    "FALCON_DEFAULT_SPATIAL_MERGE_SIZE",
+    "FALCON_DEFAULT_TEMPORAL_PATCH_SIZE",
+    "FALCON_IMAGE_MARKER",
+    "IMAGE_MARKER_OVERHEAD_TOKENS",
     "FalconDeepseekv4EnergonTaskEncoderConfig",
-    "FalconDeepseekv4TaskEncoder",
+    "FalconDocumentSample",
     "FalconEnergonTaskEncoderConfig",
+    "FalconPendingSample",
     "FalconTaskEncoder",
+    "VisualMarkerIds",
+    "cook_mint_interleaved",
+    "cook_text_document",
 ]

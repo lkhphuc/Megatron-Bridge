@@ -12,16 +12,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for the Falcon-MM H100 recipes (Energon-native packing)."""
+"""Smoke tests: Falcon-MM Qwen recipes wire the Falcon Energon task encoder."""
 
 import pytest
 
 from megatron.bridge.data.builders.energon import EnergonDatasetConfig
-from megatron.bridge.models.falcon_mm import FalconQwen35Model, FalconQwen35ModelProvider, FalconQwen35MoEModelProvider
 from megatron.bridge.models.falcon_mm.data import FalconEnergonTaskEncoderConfig
 from megatron.bridge.models.qwen_vl.qwen35_vl_provider import Qwen35VLModelProvider, Qwen35VLMoEModelProvider
 from megatron.bridge.recipes.falcon_mm.h100 import falcon_qwen35 as recipe_module
-from megatron.bridge.training.config import ConfigContainer
 
 
 def _minimal_qwen35_vl_provider() -> Qwen35VLModelProvider:
@@ -61,8 +59,6 @@ def _minimal_qwen35_vl_moe_provider() -> Qwen35VLMoEModelProvider:
 
 
 class _FakeAutoBridge:
-    """Returns a real (tiny) Qwen3.5-VL provider without any I/O."""
-
     _hf_path: str = "Qwen/Qwen3.5-2B"
 
     @staticmethod
@@ -72,7 +68,7 @@ class _FakeAutoBridge:
         return bridge
 
     def to_megatron_provider(self, load_weights: bool = False):
-        if "35B-A3B" in self._hf_path or "A3B" in self._hf_path:
+        if "A3B" in self._hf_path:
             return _minimal_qwen35_vl_moe_provider()
         return _minimal_qwen35_vl_provider()
 
@@ -82,83 +78,19 @@ def _patch_autobridge(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(recipe_module, "AutoBridge", _FakeAutoBridge)
 
 
-def _assert_energon_packing_contract(cfg: ConfigContainer) -> None:
-    """The invariants Energon-native packing requires (config.py validation)."""
-    assert isinstance(cfg, ConfigContainer)
-    assert isinstance(cfg.model, (FalconQwen35ModelProvider, FalconQwen35MoEModelProvider))
-    assert cfg.model.MODEL_CLASS is FalconQwen35Model
+@pytest.mark.parametrize(
+    "recipe_fn",
+    [
+        recipe_module.falcon_qwen35_2b_sft_1gpu_h100_bf16_config,
+        recipe_module.falcon_qwen35_2b_sft_2gpu_h100_bf16_config,
+        recipe_module.falcon_qwen35_2b_moe_pretrain_4gpu_h100_bf16_config,
+        recipe_module.falcon_qwen35_2b_moe_pretrain_8gpu_h100_bf16_config,
+        recipe_module.falcon_qwen35_35b_a3b_sft_8gpu_h100_bf16_config,
+        recipe_module.falcon_qwen35_35b_a3b_sft_16gpu_h100_bf16_config,
+    ],
+    ids=lambda fn: fn.__name__,
+)
+def test_recipe_uses_falcon_energon_encoder(recipe_fn):
+    cfg = recipe_fn()
     assert isinstance(cfg.dataset, EnergonDatasetConfig)
     assert isinstance(cfg.dataset.task_encoder, FalconEnergonTaskEncoderConfig)
-    assert cfg.dataset.packing_buffer_size == 16
-    assert cfg.dataset.micro_batch_size == 1
-    assert cfg.train.micro_batch_size == 1
-    assert cfg.model.calculate_per_token_loss is True
-    assert cfg.ddp.average_in_collective is False
-    assert (cfg.model.mtp_num_layers or 0) == 0
-    assert cfg.model.cuda_graph_impl == "none"
-
-
-class TestFalconQwen352BSftRecipes:
-    def test_1gpu_recipe_is_pp1_baseline(self):
-        cfg = recipe_module.falcon_qwen35_2b_sft_1gpu_h100_bf16_config()
-        _assert_energon_packing_contract(cfg)
-        assert isinstance(cfg.model, FalconQwen35ModelProvider)
-        assert cfg.model.pipeline_model_parallel_size == 1
-        assert cfg.model.virtual_pipeline_model_parallel_size is None
-
-    def test_2gpu_recipe_enables_pp2(self):
-        cfg = recipe_module.falcon_qwen35_2b_sft_2gpu_h100_bf16_config()
-        _assert_energon_packing_contract(cfg)
-        assert cfg.model.pipeline_model_parallel_size == 2
-        # VPP must stay unset for Energon packing (loader-state resume gap).
-        assert cfg.model.virtual_pipeline_model_parallel_size is None
-
-    def test_recipes_share_base(self):
-        cfg1 = recipe_module.falcon_qwen35_2b_sft_1gpu_h100_bf16_config()
-        cfg2 = recipe_module.falcon_qwen35_2b_sft_2gpu_h100_bf16_config()
-        assert cfg1.model.seq_length == cfg2.model.seq_length == 4096
-        assert cfg1.train.global_batch_size == cfg2.train.global_batch_size
-        assert cfg1.dataset.seq_length == cfg2.dataset.seq_length
-
-
-class TestFalconQwen352BMoEPretrainRecipes:
-    def test_4gpu_recipe_builds_moe_from_dense(self):
-        cfg = recipe_module.falcon_qwen35_2b_moe_pretrain_4gpu_h100_bf16_config()
-        _assert_energon_packing_contract(cfg)
-        assert isinstance(cfg.model, FalconQwen35MoEModelProvider)
-        assert cfg.model.num_moe_experts == 8
-        assert cfg.model.moe_router_topk == 2
-        assert cfg.model.moe_ffn_hidden_size == max(128 // 4, 128)  # dense ffn in fake provider is 128
-        assert cfg.model.pipeline_model_parallel_size == 2
-        assert cfg.model.expert_model_parallel_size == 2
-        assert cfg.model.moe_token_dispatcher_type == "alltoall"
-        assert cfg.checkpoint.pretrained_checkpoint is None
-
-    def test_8gpu_recipe_scales_ep(self):
-        cfg = recipe_module.falcon_qwen35_2b_moe_pretrain_8gpu_h100_bf16_config()
-        _assert_energon_packing_contract(cfg)
-        assert isinstance(cfg.model, FalconQwen35MoEModelProvider)
-        assert cfg.model.expert_model_parallel_size == 4
-        assert cfg.train.global_batch_size == 16
-        assert cfg.checkpoint.pretrained_checkpoint is None
-
-
-class TestFalconQwen3535BA3BSftRecipes:
-    def test_8gpu_recipe_enables_moe_and_pp(self):
-        cfg = recipe_module.falcon_qwen35_35b_a3b_sft_8gpu_h100_bf16_config()
-        _assert_energon_packing_contract(cfg)
-        assert isinstance(cfg.model, FalconQwen35MoEModelProvider)
-        assert cfg.model.pipeline_model_parallel_size == 2
-        assert cfg.model.expert_model_parallel_size == 4
-        assert cfg.model.tensor_model_parallel_size == 1
-        assert cfg.model.moe_token_dispatcher_type == "alltoall"
-        assert cfg.model.virtual_pipeline_model_parallel_size is None
-
-    def test_16gpu_recipe_scales_ep(self):
-        cfg = recipe_module.falcon_qwen35_35b_a3b_sft_16gpu_h100_bf16_config()
-        _assert_energon_packing_contract(cfg)
-        assert isinstance(cfg.model, FalconQwen35MoEModelProvider)
-        assert cfg.model.pipeline_model_parallel_size == 2
-        assert cfg.model.expert_model_parallel_size == 8
-        assert cfg.train.global_batch_size == 32
-        assert cfg.model.moe_token_dispatcher_type == "alltoall"

@@ -18,13 +18,20 @@ import json
 from pathlib import Path
 
 import pytest
+from huggingface_hub import hf_hub_download
 
 from megatron.bridge.models.falcon_mm.falcon_deepseekv4_pattern import falcon_deepseekv4_layer_pattern
 
 
 pytestmark = pytest.mark.unit
 
-_DSV4_FLASH_CONFIG = Path("FALCON_MM_AGENT_NOTES/assets/DeepSeek-V4-Flash/config.json")
+_DSV4_FLASH_REPO = "deepseek-ai/DeepSeek-V4-Flash"
+
+
+def _load_dsv4_flash_config() -> dict:
+    """Load the released DSv4-Flash config, auto-resolved from the HF cache."""
+    config_path = hf_hub_download(_DSV4_FLASH_REPO, "config.json")
+    return json.loads(Path(config_path).read_text(encoding="utf-8"))
 
 
 def test_letter_mapping_pp1_example() -> None:
@@ -59,7 +66,7 @@ def test_pp2_even_split() -> None:
 
 
 def test_pp2_odd_split_stage_lengths() -> None:
-    config = json.loads(_DSV4_FLASH_CONFIG.read_text(encoding="utf-8"))
+    config = _load_dsv4_flash_config()
     compress_ratios = config["compress_ratios"][: config["num_hidden_layers"]]
     assert len(compress_ratios) == 43
 
@@ -71,7 +78,7 @@ def test_pp2_odd_split_stage_lengths() -> None:
 
 
 def test_pp4_split_stage_lengths() -> None:
-    config = json.loads(_DSV4_FLASH_CONFIG.read_text(encoding="utf-8"))
+    config = _load_dsv4_flash_config()
     compress_ratios = config["compress_ratios"][: config["num_hidden_layers"]]
 
     pattern = falcon_deepseekv4_layer_pattern(compress_ratios, pipeline_model_parallel_size=4)
@@ -82,7 +89,7 @@ def test_pp4_split_stage_lengths() -> None:
 
 
 def test_hash_constraint_raises_when_stage0_too_small() -> None:
-    config = json.loads(_DSV4_FLASH_CONFIG.read_text(encoding="utf-8"))
+    config = _load_dsv4_flash_config()
     compress_ratios = config["compress_ratios"][: config["num_hidden_layers"]]
 
     with pytest.raises(
@@ -105,7 +112,7 @@ def test_mtp_num_layers_2() -> None:
 
 
 def test_dsv4_flash_shape_pp1() -> None:
-    config = json.loads(_DSV4_FLASH_CONFIG.read_text(encoding="utf-8"))
+    config = _load_dsv4_flash_config()
     compress_ratios = config["compress_ratios"][: config["num_hidden_layers"]]
     assert len(compress_ratios) == 43
 

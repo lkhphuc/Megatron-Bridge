@@ -149,7 +149,12 @@ def test_falcon_factory_constructs_falcon_task_encoder(monkeypatch: pytest.Monke
     """The Falcon config (a Qwen-config subclass) must select FalconTaskEncoder."""
     from megatron.bridge.models.falcon_mm.data.energon import FalconEnergonTaskEncoderConfig
 
-    config = _qwen_config(task_encoder=FalconEnergonTaskEncoderConfig(hf_processor_path="Qwen/model"))
+    # Falcon is packing-only: enable_energon_packing derives from packing_buffer_size.
+    config = _qwen_config(
+        task_encoder=FalconEnergonTaskEncoderConfig(hf_processor_path="Qwen/model"),
+        micro_batch_size=1,
+        packing_buffer_size=16,
+    )
     encoder = object()
     falcon_encoder_cls = MagicMock(return_value=encoder)
     qwen_encoder_cls = MagicMock(return_value=object())
@@ -160,7 +165,7 @@ def test_falcon_factory_constructs_falcon_task_encoder(monkeypatch: pytest.Monke
     )
     monkeypatch.setattr(
         "megatron.bridge.data.builders.energon.Qwen3VLProcessor.from_pretrained",
-        lambda *_, **__: object(),
+        lambda *_, **__: MagicMock(),
     )
     monkeypatch.setattr("megatron.bridge.models.falcon_mm.data.energon.FalconTaskEncoder", falcon_encoder_cls)
     monkeypatch.setattr("megatron.bridge.models.qwen_vl.data.energon.QwenVLTaskEncoder", qwen_encoder_cls)

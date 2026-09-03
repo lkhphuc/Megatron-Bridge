@@ -19,7 +19,6 @@ from dataclasses import fields
 import torch
 
 from megatron.bridge import AutoBridge
-from megatron.bridge.data.builders.energon import EnergonDatasetConfig
 from megatron.bridge.models.falcon_mm import (
     FalconQwen35ModelProvider,
     FalconQwen35MoEModelProvider,
@@ -27,6 +26,7 @@ from megatron.bridge.models.falcon_mm import (
 )
 from megatron.bridge.models.falcon_mm.data import FalconEnergonTaskEncoderConfig
 from megatron.bridge.recipes.common import _sft_common_vlm
+from megatron.bridge.recipes.falcon_mm.dataset import make_falcon_energon_dataset
 from megatron.bridge.recipes.utils.environment_utils import COMMON_RECIPE_ENV_VARS
 from megatron.bridge.recipes.utils.optimizer_utils import distributed_fused_adam_with_cosine_annealing
 from megatron.bridge.training.comm_overlap import CommOverlapConfig
@@ -46,19 +46,12 @@ __all__ = [
 ]
 
 
-def _make_falcon_energon_dataset(hf_path: str, seq_length: int, micro_batch_size: int) -> EnergonDatasetConfig:
-    """Create the Energon dataset config for Falcon-MM (THD Energon-native packing only).
-
-    ``path`` is intentionally None — point it at an indexed Energon dataset root
-    or a MetadatasetV2 YAML mixture via CLI: ``dataset.path=<path>``.
-    """
-    return EnergonDatasetConfig(
-        path=None,
+def _make_falcon_energon_dataset(hf_path: str, seq_length: int, micro_batch_size: int):
+    """Qwen-trunk Falcon Energon dataset (shared packing defaults)."""
+    return make_falcon_energon_dataset(
+        FalconEnergonTaskEncoderConfig(hf_processor_path=hf_path),
         seq_length=seq_length,
         micro_batch_size=micro_batch_size,
-        num_workers=2,
-        packing_buffer_size=16,
-        task_encoder=FalconEnergonTaskEncoderConfig(hf_processor_path=hf_path),
     )
 
 
@@ -73,6 +66,8 @@ def _apply_falcon_energon_sft_runtime(
     """Apply shared Energon-packing SFT runtime knobs (dense or MoE)."""
     cfg.model.seq_length = 4096
     cfg.checkpoint.save_interval = 100
+    # Overlap checkpoint I/O with training (torch_dist + persistent worker).
+    cfg.checkpoint.async_save = True
 
     cfg.model.tensor_model_parallel_size = 1
     cfg.model.pipeline_model_parallel_size = 1

@@ -482,7 +482,11 @@ class QwenVLTaskEncoder(DefaultTaskEncoder[ChatMLSample, QwenVLTaskSample, QwenV
                 if sample.prepared_sequence is not None
             )
             if packed_length > self.seq_length:
-                raise ValueError(f"Packed Qwen-VL group length {packed_length} exceeds seq_length={self.seq_length}.")
+                # SkipSample is free under Energon's packing failure handler;
+                # ValueError burns the consecutive-failure budget and dumps the pack.
+                raise SkipSample(
+                    f"Packed Qwen-VL group length {packed_length} exceeds seq_length={self.seq_length}."
+                )
             collated = build_qwen_vl_packed_batch(
                 [sample.prepared_sequence for sample in source_samples if sample.prepared_sequence is not None],
                 sequence_length=self.seq_length,
