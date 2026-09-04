@@ -1371,7 +1371,7 @@ class ConfigContainer(Container):
             # from its own loader (pure-DP-rank sharding), and vlm_step threads
             # packed metadata on all stages.
             # VPP additionally requires unbatched p2p (enforced in transformer_config) because
-            # batch_isend_irecv mispairs activation/gradient traffic under the interleaved schedule. 
+            # batch_isend_irecv mispairs activation/gradient traffic under the interleaved schedule.
             self._disable_native_energon_packing_moe_overlap()
 
         if hasattr(self.dataset, "pad_to_max_length"):

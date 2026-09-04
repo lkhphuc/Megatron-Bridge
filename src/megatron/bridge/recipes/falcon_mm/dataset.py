@@ -25,11 +25,14 @@ from megatron.bridge.models.falcon_mm.data import (
 )
 
 
+# Energon online THD packing always uses one physical micro-batch (the pack).
+FALCON_ENERGON_MICRO_BATCH_SIZE = 1
+
+
 def make_falcon_energon_dataset(
     task_encoder: FalconEnergonTaskEncoderConfig | FalconDeepseekv4EnergonTaskEncoderConfig,
     *,
     seq_length: int,
-    micro_batch_size: int = 1,
     packing_buffer_size: int = 16,
     num_workers: int = 2,
     shuffle_buffer_size: int = 100,
@@ -41,6 +44,9 @@ def make_falcon_energon_dataset(
     ``path`` is intentionally ``None`` — point it at an indexed Energon dataset
     root or a MetadatasetV2 YAML via CLI: ``dataset.path=<path>``.
 
+    ``micro_batch_size`` is fixed at :data:`FALCON_ENERGON_MICRO_BATCH_SIZE`
+    (Energon online packing requires a physical micro-batch of 1).
+
     Energon requires ``shuffle_buffer_size`` and ``max_samples_per_sequence``
     to be set explicitly (no API defaults): they trade shuffle randomness
     against sequential read locality on webdataset shards. ``100`` / ``100``
@@ -51,10 +57,12 @@ def make_falcon_energon_dataset(
     panic valves. Override via kwargs or CLI when samples are much larger /
     smaller than typical MINT pages.
     """
+    # Drop any accidental micro_batch_size override from kwargs/CLI-shaped dicts.
+    dataset_overrides.pop("micro_batch_size", None)
     kwargs: dict[str, Any] = {
         "path": None,
         "seq_length": seq_length,
-        "micro_batch_size": micro_batch_size,
+        "micro_batch_size": FALCON_ENERGON_MICRO_BATCH_SIZE,
         "num_workers": num_workers,
         "packing_buffer_size": packing_buffer_size,
         "shuffle_buffer_size": shuffle_buffer_size,
@@ -62,4 +70,5 @@ def make_falcon_energon_dataset(
         "task_encoder": task_encoder,
     }
     kwargs.update(dataset_overrides)
+    kwargs["micro_batch_size"] = FALCON_ENERGON_MICRO_BATCH_SIZE
     return EnergonDatasetConfig(**kwargs)

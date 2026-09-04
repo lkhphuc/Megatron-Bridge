@@ -130,8 +130,8 @@ def test_track_moe_metrics_supports_num_moe_layers(parameters, expected):
 
 def test_count_dsa_indexer_layers_only_ratio_four():
     model = mock.MagicMock()
-    model.csa_compress_ratios = [0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 0]
-    assert _count_dsa_indexer_layers(model) == 5
+    model.csa_compress_ratios = [0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 4]
+    assert _count_dsa_indexer_layers(model) == 6
     model.csa_compress_ratios = None
     assert _count_dsa_indexer_layers(model) is None
 
@@ -1646,7 +1646,7 @@ class TestTrainingLog:
         mock_config.model.num_moe_experts = None
         mock_config.model.mtp_num_layers = None
         mock_config.model.dsa_indexer_loss_coeff = 0.01
-        mock_config.model.csa_compress_ratios = [0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 0]
+        mock_config.model.csa_compress_ratios = [0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 4]
         mock_config.model.num_layers = 12
         mock_config.model.cuda_graph_impl = "none"
 

@@ -262,7 +262,8 @@ class TestProviderBridge:
 
         assert out is provider
         assert isinstance(out, FalconDeepseekv4ModelProvider)
-        assert out.num_layers == 2
+        assert out.num_layers is None
+        assert out.hybrid_layer_pattern == "WECE"
         assert out.v_head_dim == 512
         assert out.qk_pos_emb_head_dim == 64
         assert out.q_lora_rank == 1024
@@ -275,9 +276,14 @@ class TestProviderBridge:
         assert out.moe_n_hash_layers == 1
         assert out.mtp_num_layers == 0
         assert out.csa_compress_ratios == [0, 4]
-        assert len(out.csa_compress_ratios) == out.num_layers
         assert out.make_vocab_size_divisible_by == 1280
         assert out.seq_length == 4096
         assert out.enable_hyper_connections is True
         assert out.num_residual_streams == 4
         assert out.dsa_kernel_backend in ("cudnn", "none")
+
+        out.finalize()
+        assert out.num_layers == 4
+        assert out.csa_compress_ratios == [0, 0, 4, 0]
+        assert out.moe_layer_freq == [0, 1, 0, 1]
+        assert out.hybrid_layer_pattern == "WECE"

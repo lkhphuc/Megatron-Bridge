@@ -12,120 +12,68 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Unit tests for DSv4 hybrid layer-pattern generation."""
-
-import json
-from pathlib import Path
+"""Unit tests for Falcon DSv4 explicit hybrid patterns."""
 
 import pytest
-from huggingface_hub import hf_hub_download
 
-from megatron.bridge.models.falcon_mm.falcon_deepseekv4_pattern import falcon_deepseekv4_layer_pattern
+from megatron.bridge.models.falcon_mm.falcon_deepseekv4_pattern import (
+    falcon_deepseekv4_pattern_from_compress_ratios,
+    falcon_deepseekv4_pattern_metadata,
+    falcon_deepseekv4_pipeline_pattern,
+)
 
 
 pytestmark = pytest.mark.unit
 
-_DSV4_FLASH_REPO = "deepseek-ai/DeepSeek-V4-Flash"
-
-
-def _load_dsv4_flash_config() -> dict:
-    """Load the released DSv4-Flash config, auto-resolved from the HF cache."""
-    config_path = hf_hub_download(_DSV4_FLASH_REPO, "config.json")
-    return json.loads(Path(config_path).read_text(encoding="utf-8"))
-
-
-def test_letter_mapping_pp1_example() -> None:
-    assert falcon_deepseekv4_layer_pattern([0, 4, 128, 4]) == "WECEHECE"
-
 
 @pytest.mark.parametrize(
-    ("compress_ratio", "expected_letter"),
+    ("pattern", "expected_ratios", "expected_moe_freq"),
     [
-        (0, "W"),
-        (4, "C"),
-        (128, "H"),
+        ("W-C-H-", [0, 4, 128], [0, 0, 0]),
+        ("WECEHE", [0, 4, 128], [1, 1, 1]),
+        ("W-C-|H-", [0, 4, 128], [0, 0, 0]),
+        ("W-CEHE", [0, 4, 128], [0, 1, 1]),
     ],
 )
-def test_letter_mapping_single_layer(compress_ratio: int, expected_letter: str) -> None:
-    pattern = falcon_deepseekv4_layer_pattern([compress_ratio])
-    assert pattern == f"{expected_letter}E"
+def test_pattern_metadata(pattern: str, expected_ratios: list[int], expected_moe_freq: list[int]) -> None:
+    assert falcon_deepseekv4_pattern_metadata(pattern) == (expected_ratios, expected_moe_freq)
 
 
-def test_unknown_compress_ratio_raises() -> None:
-    with pytest.raises(ValueError, match="Unsupported compress_ratio 2 at layer index 0"):
-        falcon_deepseekv4_layer_pattern([2])
+@pytest.mark.parametrize("pattern", ["", "W", "W*", "WC"])
+def test_pattern_metadata_rejects_malformed_patterns(pattern: str) -> None:
+    with pytest.raises(ValueError):
+        falcon_deepseekv4_pattern_metadata(pattern)
 
 
-def test_empty_compress_ratios_raises() -> None:
-    with pytest.raises(ValueError, match="compress_ratios must not be empty"):
-        falcon_deepseekv4_layer_pattern([])
+def test_pattern_from_compress_ratios() -> None:
+    assert falcon_deepseekv4_pattern_from_compress_ratios([0, 4, 128]) == "WECEHE"
+    assert falcon_deepseekv4_pattern_from_compress_ratios([0, 4], ffn_symbol="-") == "W-C-"
 
 
-def test_pp2_even_split() -> None:
-    assert falcon_deepseekv4_layer_pattern([0, 0, 4, 128], pipeline_model_parallel_size=2) == "WEWE|CEHE"
-
-
-def test_pp2_odd_split_stage_lengths() -> None:
-    config = _load_dsv4_flash_config()
-    compress_ratios = config["compress_ratios"][: config["num_hidden_layers"]]
-    assert len(compress_ratios) == 43
-
-    pattern = falcon_deepseekv4_layer_pattern(compress_ratios, pipeline_model_parallel_size=2)
-    stage_segments = pattern.split("|")
-    assert len(stage_segments) == 2
-    assert len(stage_segments[0]) // 2 == 22
-    assert len(stage_segments[1]) // 2 == 21
-
-
-def test_pp4_split_stage_lengths() -> None:
-    config = _load_dsv4_flash_config()
-    compress_ratios = config["compress_ratios"][: config["num_hidden_layers"]]
-
-    pattern = falcon_deepseekv4_layer_pattern(compress_ratios, pipeline_model_parallel_size=4)
-    stage_segments = pattern.split("|")
-    assert len(stage_segments) == 4
-    stage_layer_counts = [len(segment) // 2 for segment in stage_segments]
-    assert stage_layer_counts == [11, 11, 11, 10]
+def test_pipeline_pattern_preserves_decoder_pairs() -> None:
+    pattern = falcon_deepseekv4_pipeline_pattern(
+        "W-W-C-H-C-H-C-W-",
+        pipeline_model_parallel_size=4,
+    )
+    assert pattern == "W-W-|C-H-|C-H-|C-W-"
 
 
 def test_hash_constraint_raises_when_stage0_too_small() -> None:
-    config = _load_dsv4_flash_config()
-    compress_ratios = config["compress_ratios"][: config["num_hidden_layers"]]
-
     with pytest.raises(
         ValueError,
         match=r"Pipeline stage 0 has 2 decoder layers but num_hash_layers=3",
     ):
-        falcon_deepseekv4_layer_pattern(
-            compress_ratios,
-            pipeline_model_parallel_size=22,
+        falcon_deepseekv4_pipeline_pattern(
+            "WECEHECEWECEHECE",
+            pipeline_model_parallel_size=4,
             num_hash_layers=3,
         )
 
 
-def test_mtp_num_layers_1() -> None:
-    assert falcon_deepseekv4_layer_pattern([0], mtp_num_layers=1) == "WE/WE"
-
-
-def test_mtp_num_layers_2() -> None:
-    assert falcon_deepseekv4_layer_pattern([0], mtp_num_layers=2) == "WE/WE/WE"
-
-
-def test_dsv4_flash_shape_pp1() -> None:
-    config = _load_dsv4_flash_config()
-    compress_ratios = config["compress_ratios"][: config["num_hidden_layers"]]
-    assert len(compress_ratios) == 43
-
-    pattern = falcon_deepseekv4_layer_pattern(compress_ratios)
-    assert len(pattern) == 86
-    assert set(pattern) <= {"W", "C", "H", "E"}
-
-
-def test_invalid_pipeline_model_parallel_size_raises() -> None:
-    with pytest.raises(ValueError, match="pipeline_model_parallel_size must be >= 1"):
-        falcon_deepseekv4_layer_pattern([0], pipeline_model_parallel_size=0)
-
-
-def test_invalid_mtp_num_layers_raises() -> None:
-    with pytest.raises(ValueError, match="mtp_num_layers must be >= 0"):
-        falcon_deepseekv4_layer_pattern([0], mtp_num_layers=-1)
+def test_hash_constraint_requires_leading_moe_symbols() -> None:
+    with pytest.raises(ValueError, match="first 2 decoder layers to use MoE"):
+        falcon_deepseekv4_pipeline_pattern(
+            "W-CEHECE",
+            pipeline_model_parallel_size=1,
+            num_hash_layers=2,
+        )

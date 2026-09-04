@@ -61,11 +61,7 @@ def _maybe_build_global_mrope_position_ids(
         return
 
     position_ids = batch.get("position_ids")
-    if (
-        isinstance(position_ids, torch.Tensor)
-        and position_ids.dim() == 3
-        and position_ids.size(0) == 3
-    ):
+    if isinstance(position_ids, torch.Tensor) and position_ids.dim() == 3 and position_ids.size(0) == 3:
         return
 
     tokens = batch.get("tokens") if batch.get("tokens") is not None else batch.get("input_ids")
@@ -300,7 +296,7 @@ def get_batch(
     return (
         (batch.get("tokens") if batch.get("tokens") is not None else batch.get("input_ids")),
         batch.get("labels"),
-        batch.get("loss_mask"),  # Full packed loss_mask, will be CP-sliced by model
+        batch.get("loss_mask"),  # Rank-local for contiguous CP; otherwise unchanged here.
         batch.get("attention_mask"),
         batch.get("position_ids"),
         {key: batch[key] for key in _PACKED_SEQ_PARAM_KEYS if batch.get(key) is not None}
@@ -433,7 +429,7 @@ def forward_step(
         "position_ids": position_ids,
         "attention_mask": attention_mask,
         "labels": labels,
-        "loss_mask": loss_mask,  # Pass full loss_mask so model can slice it consistently with labels
+        "loss_mask": loss_mask,  # Already rank-local when contiguous CP slicing is active.
     }
 
     if visual_inputs is not None:
@@ -447,7 +443,20 @@ def forward_step(
         # transformer models to avoid per-step CUDA overhead.
         if getattr(config, "is_hybrid_model", False):
             packed_seq_params["total_tokens"] = tokens.size(1) if tokens is not None else labels.size(1)
-        forward_args["packed_seq_params"] = get_packed_seq_params(packed_seq_params)
+        prepared_packed_seq_params = get_packed_seq_params(packed_seq_params)
+        if getattr(config, "dsa_cp_balance_indexer", False):
+            # Build the per-pack zigzag dispatch route during data preparation.
+            # Without this, every DSA layer falls back to the full-S AllGather
+            # dispatch/combine path instead of the ~local-row A2A route.
+            from megatron.training.utils.packed_seq_utils import prepare_packed_seq_params
+
+            global_capacity = tokens.shape[1] * pg_collection.cp.size()
+            prepared_packed_seq_params = prepare_packed_seq_params(
+                prepared_packed_seq_params,
+                config,
+                capacity=global_capacity,
+            )
+        forward_args["packed_seq_params"] = prepared_packed_seq_params
 
     if loss_mask is not None:
         loss_mask = loss_mask.contiguous()

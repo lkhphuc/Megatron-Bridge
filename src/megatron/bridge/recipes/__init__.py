@@ -23,6 +23,7 @@ from megatron.bridge.recipes.deepseek.h100 import *
 from megatron.bridge.recipes.exaone import *
 from megatron.bridge.recipes.exaone.h100 import *
 from megatron.bridge.recipes.falcon_mm import *
+from megatron.bridge.recipes.falcon_mm.b200 import *
 from megatron.bridge.recipes.falcon_mm.h100 import *
 from megatron.bridge.recipes.flux import *
 from megatron.bridge.recipes.flux.h100 import *

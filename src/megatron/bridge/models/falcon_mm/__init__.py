@@ -17,9 +17,6 @@
 from megatron.bridge.models.falcon_mm.falcon_deepseekv4_bridge import (
     FalconDeepseekv4Bridge,
 )
-from megatron.bridge.models.falcon_mm.falcon_deepseekv4_pattern import (
-    falcon_deepseekv4_layer_pattern,
-)
 from megatron.bridge.models.falcon_mm.falcon_deepseekv4_provider import (
     FalconDeepseekv4ModelProvider,
 )
@@ -55,7 +52,6 @@ __all__ = [
     "FalconVLTopKRouter",
     "FALCON_DSV4_DEFAULT_MROPE_SECTION",
     "build_falcon_dsv4_mrope_position_ids",
-    "falcon_deepseekv4_layer_pattern",
     "falcon_dsv4_stack_spec",
     "falcon_hybrid_dsv4_vl_stack_spec",
     "falcon_qwen35_provider_from_qwen35_vl",

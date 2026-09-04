@@ -43,6 +43,9 @@ from megatron.bridge.models.deepseek.deepseek_v4_bridge import (
     deepseek_v4_supports_blackwell_fused_kernels,
     deepseek_v4_supports_fused_dsa_kernels,
 )
+from megatron.bridge.models.falcon_mm.falcon_deepseekv4_pattern import (
+    falcon_deepseekv4_pattern_from_compress_ratios,
+)
 from megatron.bridge.models.falcon_mm.falcon_deepseekv4_provider import (
     FalconDeepseekv4ModelProvider,
 )
@@ -136,19 +139,20 @@ class FalconDeepseekv4Bridge(DeepSeekV4Bridge):
         # Multimodal RoPE: keep position_embedding_type="rope"; DSv4 layer-local
         # rotary modules consume mrope_section independently of model-level type.
         provider.mrope_section = (
-            rope_params.get("mrope_section")
-            or main_rope_params.get("mrope_section")
-            or [11, 11, 10]
+            rope_params.get("mrope_section") or main_rope_params.get("mrope_section") or [11, 11, 10]
         )
         provider.mrope_interleaved = bool(
             rope_params.get("mrope_interleaved", main_rope_params.get("mrope_interleaved", True))
         )
 
-        # ---- CSA ----
+        # ---- CSA / hybrid pattern ----
         # Phase 1: no MTP — slice compress ratios to num_hidden_layers only.
+        # num_layers is derived from hybrid_layer_pattern in finalize().
         num_hidden_layers = int(hf_config.num_hidden_layers)
-        provider.num_layers = num_hidden_layers
-        provider.csa_compress_ratios = _dsv4_compress_ratios(hf_config)[:num_hidden_layers]
+        compress_ratios = _dsv4_compress_ratios(hf_config)[:num_hidden_layers]
+        provider.num_layers = None
+        provider.csa_compress_ratios = compress_ratios
+        provider.hybrid_layer_pattern = falcon_deepseekv4_pattern_from_compress_ratios(compress_ratios)
         provider.csa_window_size = hf_config.sliding_window
         provider.dsa_indexer_n_heads = hf_config.index_n_heads
         provider.dsa_indexer_head_dim = hf_config.index_head_dim
@@ -182,7 +186,7 @@ class FalconDeepseekv4Bridge(DeepSeekV4Bridge):
         provider.moe_n_hash_layers = _dsv4_num_hash_layers(hf_config)
         provider.actual_vocab_size = hf_config.vocab_size
         provider.activation_func_clamp_value = hf_config.swiglu_limit
-        provider.moe_layer_freq = [1] * num_hidden_layers
+        # moe_layer_freq is derived from hybrid_layer_pattern in finalize().
         provider.moe_shared_expert_intermediate_size = hf_config.moe_intermediate_size * hf_config.n_shared_experts
 
         # ---- MTP (phase 1: disabled — Energon packing rejects MTP) ----

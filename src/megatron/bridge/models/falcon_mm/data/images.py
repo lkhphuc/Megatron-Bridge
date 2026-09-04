@@ -151,9 +151,7 @@ class ImageDocument:
             object.__setattr__(self, "data", _ShortReprBytes(self.data))
 
     def __repr__(self) -> str:
-        return (
-            f"ImageDocument(pages={len(self.page_sizes)}, nbytes={len(self.data)}, page_sizes={self.page_sizes!r})"
-        )
+        return f"ImageDocument(pages={len(self.page_sizes)}, nbytes={len(self.data)}, page_sizes={self.page_sizes!r})"
 
     @classmethod
     def from_bytes(cls, data: bytes) -> ImageDocument:
@@ -197,8 +195,7 @@ class ImagePageRef:
     def __repr__(self) -> str:
         width, height = self.size
         return (
-            f"ImagePageRef(page_index={self.page_index}, size=({width}, {height}), "
-            f"nbytes={len(self.document.data)})"
+            f"ImagePageRef(page_index={self.page_index}, size=({width}, {height}), nbytes={len(self.document.data)})"
         )
 
 

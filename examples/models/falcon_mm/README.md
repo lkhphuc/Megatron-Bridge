@@ -210,12 +210,21 @@ splits:
           crude_type: text
 ```
 
-Train (example):
+Train (example — 8×B200 Falcon DSv4 MoE):
 
 ```bash
 ENERGON_PATH=/mnt/datasets/falcon_pretrain_mixture.yaml \
   bash examples/models/falcon_mm/thd_energon.sh
 ```
+
+The default recipe,
+`falcon_deepseekv4_moe_35b_a3b_pretrain_8gpu_b200_bf16_config`, uses
+the DSv4 Flash-Base tokenizer, TP1/PP1/EP8, selective recompute
+`mla_up_proj`+`mhc`, sequence length 1024, and packing buffer 64. Full-Flash
+`falcon_deepseekv4_flash_pretrain_8gpu_b200_bf16_config` is for weight-import
+bring-up only. Override with `RECIPE=...` / `SEQ_LENGTH=...` as needed.
+The dense 1B recipe is a smaller bring-up option; resize the mesh only after
+checking model fit and the intended data semantics.
 
 
 
@@ -296,4 +305,3 @@ dual-bias checkpoints.
 - Primary + Auxiliary datasets (shared media, separate caption/interleave).
 - Energon media metadata + cache pool.
 - Skip heavy media work on non-first PP ranks.
-

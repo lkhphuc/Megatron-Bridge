@@ -29,7 +29,7 @@ from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_config import MLATransformerConfig
 
 from megatron.bridge.models.falcon_mm.falcon_deepseekv4_pattern import (
-    falcon_deepseekv4_layer_pattern,
+    falcon_deepseekv4_pattern_metadata,
 )
 from megatron.bridge.models.falcon_mm.falcon_hybrid_layer_specs import falcon_dsv4_stack_spec
 from megatron.bridge.models.falcon_mm.modelling_falcon_mm.model_deepseekv4 import (
@@ -103,6 +103,10 @@ class FalconDeepseekv4ModelProvider(MLATransformerConfig, HybridModelProvider):
 
     MODEL_CLASS: ClassVar[type[HybridModel] | None] = FalconDeepseekv4Model
 
+    # MLATransformerConfig defaults this to 0; HybridModelProvider uses None
+    # to mean that finalize() should derive the count from the pattern.
+    num_layers: int | None = None
+
     # Falcon multimodal surface
     image_token_id: int = 128000
     vision_start_token_id: int = FALCON_DSV4_VISION_START_TOKEN_ID
@@ -122,9 +126,7 @@ class FalconDeepseekv4ModelProvider(MLATransformerConfig, HybridModelProvider):
     rotary_percent: float = 1.0
     position_embedding_type: str = "rope"
     # Multimodal RoPE (Qwen3.5-compatible). Gate is mrope_section is not None.
-    mrope_section: Optional[list[int]] = field(
-        default_factory=lambda: list(FALCON_DSV4_DEFAULT_MROPE_SECTION)
-    )
+    mrope_section: Optional[list[int]] = field(default_factory=lambda: list(FALCON_DSV4_DEFAULT_MROPE_SECTION))
     mrope_interleaved: bool = True
     gated_linear_unit: bool = True
     moe_grouped_gemm: bool = True
@@ -132,6 +134,41 @@ class FalconDeepseekv4ModelProvider(MLATransformerConfig, HybridModelProvider):
 
     # DSv4 stack spec (config-aware callable; VL router when moe_vl_routing)
     hybrid_stack_spec: Union[ModuleSpec, Callable, None] = falcon_dsv4_stack_spec
+
+    def finalize(self) -> None:
+        """Finalize Falcon DSv4 architecture from the explicit hybrid pattern.
+
+        Follows the HybridModelProvider convention: ``num_layers`` equals the
+        hybrid pattern symbol count. ``csa_compress_ratios`` and
+        ``moe_layer_freq`` are expanded to that same length (attention symbol
+        then FFN symbol) so Core length checks stay consistent.
+        """
+        pattern = self.hybrid_layer_pattern
+        if pattern is None:
+            raise ValueError("FalconDeepseekv4ModelProvider requires hybrid_layer_pattern")
+
+        compress_ratios, moe_layer_freq = falcon_deepseekv4_pattern_metadata(pattern)
+        uses_any_moe = any(moe_layer_freq)
+        if uses_any_moe and self.num_moe_experts is None:
+            raise ValueError("Falcon DSv4 pattern contains MoE (E) layers but num_moe_experts is None")
+        if not uses_any_moe and self.num_moe_experts is not None:
+            raise ValueError(
+                "Falcon DSv4 pattern is fully dense but num_moe_experts is set; "
+                "clear num_moe_experts or use E FFN symbols"
+            )
+        num_hash_layers = self.moe_n_hash_layers or 0
+        if num_hash_layers > 0 and any(flag == 0 for flag in moe_layer_freq[:num_hash_layers]):
+            raise ValueError(
+                f"moe_n_hash_layers={num_hash_layers} requires the first "
+                f"{num_hash_layers} decoder layers to use MoE (E) FFN symbols"
+            )
+
+        self.csa_compress_ratios = [
+            value for ratio, is_moe in zip(compress_ratios, moe_layer_freq, strict=True) for value in (ratio, 0)
+        ]
+        self.moe_layer_freq = [value for is_moe in moe_layer_freq for value in (0, is_moe)]
+        # HybridModelProvider checks an explicit num_layers against the pattern.
+        super().finalize()
 
     def _build_patch_embed_config(self) -> Qwen3VLTransformerConfig:
         """Build the vision config consumed by the Falcon patch embed."""
@@ -249,23 +286,6 @@ class FalconDeepseekv4ModelProvider(MLATransformerConfig, HybridModelProvider):
         assert self.vocab_size is not None, "vocab_size must be configured before calling provide()"
 
         hybrid_stack_spec = self._resolve_hybrid_stack_spec()
-
-        if self.hybrid_layer_pattern is None:
-            ratios = list(self.csa_compress_ratios or [])
-            num_layers = self.num_layers or len(ratios)
-            if len(ratios) < num_layers:
-                raise ValueError(
-                    f"csa_compress_ratios has {len(ratios)} entries but num_layers is {num_layers}. "
-                    "DSv4 needs one compress ratio per decoder layer."
-                )
-            # Assign back so checkpointing and layer-count derivation see the
-            # same pattern the model was built with.
-            self.hybrid_layer_pattern = falcon_deepseekv4_layer_pattern(
-                ratios[:num_layers],
-                pipeline_model_parallel_size=self.pipeline_model_parallel_size or 1,
-                mtp_num_layers=self.mtp_num_layers or 0,
-                num_hash_layers=self.moe_n_hash_layers or 0,
-            )
 
         if self.should_pad_vocab:
             padded_vocab_size = calculate_padded_vocab_size(

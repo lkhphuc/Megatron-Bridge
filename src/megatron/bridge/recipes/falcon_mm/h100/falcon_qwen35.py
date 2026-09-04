@@ -26,7 +26,10 @@ from megatron.bridge.models.falcon_mm import (
 )
 from megatron.bridge.models.falcon_mm.data import FalconEnergonTaskEncoderConfig
 from megatron.bridge.recipes.common import _sft_common_vlm
-from megatron.bridge.recipes.falcon_mm.dataset import make_falcon_energon_dataset
+from megatron.bridge.recipes.falcon_mm.dataset import (
+    FALCON_ENERGON_MICRO_BATCH_SIZE,
+    make_falcon_energon_dataset,
+)
 from megatron.bridge.recipes.utils.environment_utils import COMMON_RECIPE_ENV_VARS
 from megatron.bridge.recipes.utils.optimizer_utils import distributed_fused_adam_with_cosine_annealing
 from megatron.bridge.training.comm_overlap import CommOverlapConfig
@@ -39,19 +42,18 @@ _HF_35B_A3B = "Qwen/Qwen3.5-35B-A3B"
 __all__ = [
     "falcon_qwen35_2b_sft_1gpu_h100_bf16_config",
     "falcon_qwen35_2b_sft_2gpu_h100_bf16_config",
-    "falcon_qwen35_2b_moe_pretrain_4gpu_h100_bf16_config",
-    "falcon_qwen35_2b_moe_pretrain_8gpu_h100_bf16_config",
+    "falcon_qwen35_2b_pretrain_4gpu_h100_bf16_config",
+    "falcon_qwen35_2b_pretrain_8gpu_h100_bf16_config",
     "falcon_qwen35_35b_a3b_sft_8gpu_h100_bf16_config",
     "falcon_qwen35_35b_a3b_sft_16gpu_h100_bf16_config",
 ]
 
 
-def _make_falcon_energon_dataset(hf_path: str, seq_length: int, micro_batch_size: int):
-    """Qwen-trunk Falcon Energon dataset (shared packing defaults)."""
+def _make_falcon_energon_dataset(hf_path: str, seq_length: int):
+    """Qwen-trunk Falcon Energon dataset (shared packing defaults; MBS fixed at 1)."""
     return make_falcon_energon_dataset(
         FalconEnergonTaskEncoderConfig(hf_processor_path=hf_path),
         seq_length=seq_length,
-        micro_batch_size=micro_batch_size,
     )
 
 
@@ -109,12 +111,13 @@ def _apply_falcon_energon_sft_runtime(
     # Training config
     cfg.train.train_iters = 300000
     cfg.train.global_batch_size = global_batch_size
-    cfg.train.micro_batch_size = 1  # required by Energon native packing
+    cfg.train.micro_batch_size = FALCON_ENERGON_MICRO_BATCH_SIZE
     cfg.train.manual_gc = True
     cfg.train.manual_gc_interval = 100
     cfg.train.manual_gc_eval = 100
     cfg.validation.eval_interval = 500
     cfg.validation.eval_iters = 32
+    cfg.validation.eval_micro_batch_size = FALCON_ENERGON_MICRO_BATCH_SIZE
 
     cfg.logger.log_throughput_to_tensorboard = True
     cfg.logger.throughput_window_size = 10
@@ -136,7 +139,7 @@ def _apply_falcon_energon_sft_runtime(
     cfg.optimizer.exp_avg_sq_dtype = torch.float32
 
     # Dataset config: THD Energon-native packing only
-    cfg.dataset = _make_falcon_energon_dataset(hf_path, cfg.model.seq_length, cfg.train.micro_batch_size)
+    cfg.dataset = _make_falcon_energon_dataset(hf_path, cfg.model.seq_length)
 
     # DDP config
     cfg.ddp.overlap_grad_reduce = False
@@ -276,7 +279,7 @@ def _falcon_qwen35_2b_moe_pretrain_base() -> ConfigContainer:
     return cfg
 
 
-def falcon_qwen35_2b_moe_pretrain_4gpu_h100_bf16_config() -> ConfigContainer:
+def falcon_qwen35_2b_pretrain_4gpu_h100_bf16_config() -> ConfigContainer:
     """Return a from-scratch MoE pretrain config for Falcon-MM 2B (toy MoE).
 
     Default configuration: 4 GPUs
@@ -294,7 +297,7 @@ def falcon_qwen35_2b_moe_pretrain_4gpu_h100_bf16_config() -> ConfigContainer:
     return _falcon_qwen35_2b_moe_pretrain_base()
 
 
-def falcon_qwen35_2b_moe_pretrain_8gpu_h100_bf16_config() -> ConfigContainer:
+def falcon_qwen35_2b_pretrain_8gpu_h100_bf16_config() -> ConfigContainer:
     """Return a from-scratch MoE pretrain config for Falcon-MM 2B on 8 GPUs.
 
     Default configuration: 8 GPUs

@@ -29,6 +29,7 @@ from megatron.core.packed_seq_params import PackedSeqParams
 
 from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.rope import get_rope_index
 
+
 # Provisional Qwen3.5-compatible section for R=64 (F=32 frequency pairs).
 FALCON_DSV4_DEFAULT_MROPE_SECTION: list[int] = [11, 11, 10]
 

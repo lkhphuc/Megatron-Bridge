@@ -83,8 +83,8 @@ def _patch_autobridge(monkeypatch: pytest.MonkeyPatch):
     [
         recipe_module.falcon_qwen35_2b_sft_1gpu_h100_bf16_config,
         recipe_module.falcon_qwen35_2b_sft_2gpu_h100_bf16_config,
-        recipe_module.falcon_qwen35_2b_moe_pretrain_4gpu_h100_bf16_config,
-        recipe_module.falcon_qwen35_2b_moe_pretrain_8gpu_h100_bf16_config,
+        recipe_module.falcon_qwen35_2b_pretrain_4gpu_h100_bf16_config,
+        recipe_module.falcon_qwen35_2b_pretrain_8gpu_h100_bf16_config,
         recipe_module.falcon_qwen35_35b_a3b_sft_8gpu_h100_bf16_config,
         recipe_module.falcon_qwen35_35b_a3b_sft_16gpu_h100_bf16_config,
     ],

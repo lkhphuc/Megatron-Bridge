@@ -17,13 +17,14 @@ from megatron.bridge.recipes.falcon_mm.h100.falcon_qwen35 import *  # noqa: F403
 
 
 __all__ = [
-    "falcon_deepseekv4_mock_2b6_pretrain_2gpu_h100_bf16_config",
-    "falcon_deepseekv4_mock_2b6_pretrain_2gpu_h100_bf16_cp2_config",
-    "falcon_deepseekv4_mock_2b6_pretrain_8gpu_h100_bf16_config",
+    "falcon_deepseekv4_1b_pretrain_2gpu_h100_bf16_config",
+    "falcon_deepseekv4_3b_pretrain_2gpu_h100_bf16_config",
+    "falcon_deepseekv4_10b_pretrain_2gpu_h100_bf16_config",
+    "falcon_deepseekv4_35b_a3b_pretrain_8gpu_h100_bf16_config",
     "falcon_qwen35_2b_sft_1gpu_h100_bf16_config",
     "falcon_qwen35_2b_sft_2gpu_h100_bf16_config",
-    "falcon_qwen35_2b_moe_pretrain_4gpu_h100_bf16_config",
-    "falcon_qwen35_2b_moe_pretrain_8gpu_h100_bf16_config",
+    "falcon_qwen35_2b_pretrain_4gpu_h100_bf16_config",
+    "falcon_qwen35_2b_pretrain_8gpu_h100_bf16_config",
     "falcon_qwen35_35b_a3b_sft_8gpu_h100_bf16_config",
     "falcon_qwen35_35b_a3b_sft_16gpu_h100_bf16_config",
 ]

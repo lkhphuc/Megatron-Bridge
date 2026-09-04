@@ -12,273 +12,81 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Falcon-MM DeepSeek-V4 (encoder-free, HybridModel trunk) recipes for H100.
+"""Falcon-MM DeepSeek-V4 dense and MoE recipes for H100.
 
-Launch with the VLM step (CP=1 at this time; the DSv4 contiguous-CP step
-lands with plan item D4):
-
-    scripts/training/run_recipe.py \
-        --recipe falcon_deepseekv4_mock_2b6_pretrain_2gpu_h100_bf16_config \
-        --step_func vlm_step \
-        dataset.path=<energon dataset or MetadatasetV2 yaml>
-
-The mock is from-scratch only: pass ``checkpoint.pretrained_checkpoint=null``.
-Text is tokenized with the real DeepSeek-V4 tokenizer
-(``_DSV4_TOKENIZER_PATH``); override with
-``dataset.task_encoder.ds_tokenizer_path=<path>``.
+Launch with ``--step_func vlm_step`` and an Energon dataset path. The scaling
+recipes train from scratch; set ``checkpoint.pretrained_checkpoint=null``.
 """
 
-import torch
+from collections.abc import Callable
 
 from megatron.bridge.models.falcon_mm import FalconDeepseekv4ModelProvider
-from megatron.bridge.models.falcon_mm.data import FalconDeepseekv4EnergonTaskEncoderConfig
 from megatron.bridge.recipes.common import _pretrain_common
-from megatron.bridge.recipes.falcon_mm.dataset import make_falcon_energon_dataset
-from megatron.bridge.recipes.utils.environment_utils import COMMON_RECIPE_ENV_VARS
-from megatron.bridge.recipes.utils.optimizer_utils import distributed_fused_adam_with_cosine_annealing
-from megatron.bridge.training.comm_overlap import CommOverlapConfig
+from megatron.bridge.recipes.falcon_mm.falcon_deepseekv4_common import (
+    apply_falcon_dsv4_energon_runtime,
+    falcon_deepseekv4_1b_provider,
+    falcon_deepseekv4_3b_provider,
+    falcon_deepseekv4_10b_provider,
+    falcon_deepseekv4_35b_a3b_provider,
+)
 from megatron.bridge.training.config import ConfigContainer
 
 
-_DSV4_TOKENIZER_PATH = "deepseek-ai/DeepSeek-V4-Flash-Base"
-
-# 12-layer mock: window, window, then alternating CSA(4) / HCA(128).
-_MOCK_COMPRESS_RATIOS = [0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128]
-
 __all__ = [
-    "falcon_deepseekv4_mock_2b6_pretrain_2gpu_h100_bf16_config",
-    "falcon_deepseekv4_mock_2b6_pretrain_2gpu_h100_bf16_cp2_config",
-    "falcon_deepseekv4_mock_2b6_pretrain_8gpu_h100_bf16_config",
+    "falcon_deepseekv4_1b_pretrain_2gpu_h100_bf16_config",
+    "falcon_deepseekv4_3b_pretrain_2gpu_h100_bf16_config",
+    "falcon_deepseekv4_10b_pretrain_2gpu_h100_bf16_config",
+    "falcon_deepseekv4_35b_a3b_pretrain_8gpu_h100_bf16_config",
 ]
 
 
-def _make_falcon_dsv4_energon_dataset(seq_length: int, micro_batch_size: int):
-    """DSv4 Falcon Energon dataset (shared packing defaults)."""
-    return make_falcon_energon_dataset(
-        FalconDeepseekv4EnergonTaskEncoderConfig(ds_tokenizer_path=_DSV4_TOKENIZER_PATH),
-        seq_length=seq_length,
-        micro_batch_size=micro_batch_size,
-    )
-
-
-def _falcon_deepseekv4_mock_2b6_provider() -> FalconDeepseekv4ModelProvider:
-    """Build the ~2.6B mock DSv4 provider (D1-spike-verified sizing).
-
-    Keeps the DSv4 Flash per-head attention geometry (v_head_dim=512,
-    qk_rope=64) and shrinks the counts: hidden 2048, 12 layers, 32 experts.
-    """
-    return FalconDeepseekv4ModelProvider(
-        num_layers=len(_MOCK_COMPRESS_RATIOS),
-        hidden_size=2048,
-        num_attention_heads=16,
-        vocab_size=129280,
-        seq_length=1024,
-        # ---- MLA geometry ----
-        v_head_dim=512,
-        qk_pos_emb_head_dim=64,
-        q_lora_rank=512,
-        o_groups=4,
-        o_lora_rank=512,
-        # ---- CSA / indexer ----
-        csa_compress_ratios=_MOCK_COMPRESS_RATIOS,
-        csa_window_size=128,
-        csa_compress_rotary_base=160000.0,
-        dsa_indexer_n_heads=16,
-        dsa_indexer_head_dim=128,
-        dsa_indexer_topk=64,
-        dsa_kernel_backend="none",
-        dsa_indexer_loss_coeff=0.01,
-        dsa_indexer_use_sparse_loss=True,
-        # ---- RoPE (YaRN) ----
-        rotary_base=10000,
-        rope_type="yarn",
-        rotary_scaling_factor=16.0,
-        original_max_position_embeddings=65536,
-        beta_fast=32.0,
-        beta_slow=1.0,
-        mscale=1.0,
-        mscale_all_dim=1.0,
-        # ---- Hyper-connections ----
-        enable_hyper_connections=True,
-        use_fused_mhc=False,
-        num_residual_streams=4,
-        mhc_sinkhorn_iterations=20,
-        # ---- MoE ----
-        num_moe_experts=32,
-        moe_router_topk=4,
-        moe_ffn_hidden_size=768,
-        moe_shared_expert_intermediate_size=768,
-        moe_layer_freq=[1] * len(_MOCK_COMPRESS_RATIOS),
-        moe_n_hash_layers=2,
-        actual_vocab_size=129280,
-        moe_router_score_function="sqrtsoftplus",
-        moe_router_enable_expert_bias=True,
-        moe_router_dtype="fp32",
-        moe_router_topk_scaling_factor=1.5,
-        moe_router_load_balancing_type="noaux_tc",
-        moe_aux_loss_coeff=0.0,
-        moe_token_dispatcher_type="alltoall",
-        moe_permute_fusion=True,
-        moe_shared_expert_overlap=False,
-        # Hash image pads bypass tid2eid via shared expert_bias (text keeps tid2eid).
-        moe_vl_routing=True,
-        activation_func_clamp_value=10.0,
-        # ---- Parallelism / runtime ----
-        tensor_model_parallel_size=1,
-        pipeline_model_parallel_size=1,
-        context_parallel_size=1,
-        expert_tensor_parallel_size=1,
-        sequence_parallel=False,
-        mtp_num_layers=0,
-        share_embeddings_and_output_weights=False,
-        make_vocab_size_divisible_by=1280,
-        layernorm_epsilon=1e-6,
-        gradient_accumulation_fusion=False,
-        # Fused CE is required at 4k: the unfused path materializes several
-        # fp32 [seq, 129280] logit/softmax copies (~16 GiB in backward).
-        cross_entropy_loss_fusion=True,
-        cross_entropy_fusion_impl="native",
-        calculate_per_token_loss=True,
-        # "auto" satisfies the THD packing backend guard; the DSv4 attention
-        # modules select their own kernels via dsa_kernel_backend.
-        attention_backend="auto",
-    )
-
-
-def _apply_falcon_dsv4_energon_runtime(cfg: ConfigContainer, *, max_lr: float, min_lr: float) -> None:
-    """Apply shared Energon-packing pretrain runtime knobs for Falcon DSv4."""
-    cfg.checkpoint.save_interval = 5000
-    # Overlap checkpoint I/O with training (torch_dist + persistent worker).
-    cfg.checkpoint.async_save = True
-
-    cfg.model.transformer_impl = "transformer_engine"
-    cfg.model.cuda_graph_impl = "none"
-    cfg.model.virtual_pipeline_model_parallel_size = None
-
-    # Memory: fused CE only, no recompute. Both recompute modes are
-    # incompatible with this trunk at this time: selective recompute needs
-    # checkpointed core attention (unsupported in DSv4 Hybrid Attention) and
-    # full-layer recompute drops input_ids during the re-run, which breaks
-    # hash-routed MoE layers. Fused CE removes the dominant memory term
-    # (~16 GiB of fp32 logit/softmax copies at 4k).
-    cfg.model.recompute_granularity = None
-    cfg.model.recompute_method = None
-    cfg.model.recompute_num_layers = None
-    cfg.model.recompute_modules = None
-
-    # Training config
-    cfg.train.train_iters = 1000
-    cfg.train.global_batch_size = 8
-    cfg.train.micro_batch_size = 1  # required by Energon native packing
-    cfg.train.manual_gc = True
-    cfg.train.manual_gc_interval = 100
-    cfg.train.manual_gc_eval = 100
-    cfg.validation.eval_interval = 500
-    cfg.validation.eval_iters = 8
-
-    # Optimizer
-    opt_cfg, scheduler_cfg = distributed_fused_adam_with_cosine_annealing(
-        lr_warmup_iters=100,
-        lr_decay_iters=None,
-        max_lr=max_lr,
-        min_lr=min_lr,
-    )
-    cfg.optimizer = opt_cfg
-    cfg.scheduler = scheduler_cfg
-    cfg.optimizer.use_precision_aware_optimizer = False
-    cfg.optimizer.main_grads_dtype = torch.float32
-    cfg.optimizer.main_params_dtype = torch.float32
-    cfg.optimizer.exp_avg_dtype = torch.float32
-    cfg.optimizer.exp_avg_sq_dtype = torch.float32
-
-    # Tokenizer for the training loop (checkpoint metadata, eval splits).
-    # The dataset plane tokenizes inside the Energon workers with the same
-    # DSv4 tokenizer (see the task encoder config).
-    cfg.tokenizer.tokenizer_model = _DSV4_TOKENIZER_PATH
-
-    # Dataset config: THD Energon-native packing only
-    cfg.dataset = _make_falcon_dsv4_energon_dataset(cfg.model.seq_length, cfg.train.micro_batch_size)
-
-    # DDP config
-    cfg.ddp.overlap_grad_reduce = False
-    cfg.ddp.overlap_param_gather = False
-    cfg.ddp.check_for_nan_in_grad = True
-    cfg.ddp.use_distributed_optimizer = True
-    cfg.ddp.grad_reduce_in_fp32 = True
-    cfg.ddp.average_in_collective = False  # required by Energon native packing
-    cfg.ddp.data_parallel_sharding_strategy = "optim_grads_params"
-
-    # Keep MoE EP overlap off until the packed schedule-plan threading lands (C4).
-    cfg.comm_overlap = CommOverlapConfig(
-        tp_comm_overlap=False,
-        overlap_grad_reduce=False,
-        overlap_param_gather=False,
-        overlap_param_gather_with_optimizer_step=False,
-        overlap_moe_expert_parallel_comm=False,
-        delay_wgrad_compute=False,
-    )
-
-    cfg.mixed_precision = "bf16_mixed"
-    cfg.env_vars = {
-        **COMMON_RECIPE_ENV_VARS,
-        "CUDA_DEVICE_MAX_CONNECTIONS": 1,
-        # Varlen packs fragment the allocator; expandable segments avoid the
-        # reserved-but-unallocated growth seen at 4k on this trunk.
-        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
-    }
-
-
-def _falcon_deepseekv4_mock_2b6_pretrain_base() -> ConfigContainer:
-    """Shared base for the ~2.6B mock DSv4 pretrain recipes."""
+def _falcon_deepseekv4_pretrain_base(
+    provider_factory: Callable[[], FalconDeepseekv4ModelProvider],
+    *,
+    expert_parallel_size: int,
+) -> ConfigContainer:
+    """Shared H100 base for dense and MoE Falcon DSv4 recipes."""
     cfg = _pretrain_common()
-    cfg.model = _falcon_deepseekv4_mock_2b6_provider()
-    _apply_falcon_dsv4_energon_runtime(cfg, max_lr=3e-4, min_lr=3e-5)
+    cfg.model = provider_factory()
+    apply_falcon_dsv4_energon_runtime(
+        cfg,
+        max_lr=3e-4,
+        min_lr=3e-5,
+        env_vars={"CUDA_DEVICE_MAX_CONNECTIONS": 1},
+    )
+    cfg.model.expert_model_parallel_size = expert_parallel_size
     return cfg
 
 
-def falcon_deepseekv4_mock_2b6_pretrain_2gpu_h100_bf16_config() -> ConfigContainer:
-    """Return a from-scratch pretrain smoke config for Falcon DSv4 (~2.6B mock).
+def falcon_deepseekv4_1b_pretrain_2gpu_h100_bf16_config() -> ConfigContainer:
+    """Return a 2-GPU H100 from-scratch pretrain config for Falcon DSv4 dense ~1B.
 
     Default configuration: 2 GPU
-    - TP=1, PP=1, CP=1, EP=2 (D1-verified topology)
-    - Energon-native THD packing (packing_buffer_size=16), MBS=1
-    - Real DeepSeek-V4 tokenizer; image placeholder = reserved token 128000
-    - LR=3e-4, cosine to 3e-5, 1000 iters
-    - Sequence length: 1024
+    - TP=1, PP=1, CP=1, EP=1 (dense MLP; DP absorbs world size)
+    - Energon-native THD packing, MBS=1, seq=1024
+    - Selective recompute: ``mla_up_proj``, ``mhc``
 
-    This is the current working config from the D1 spike. From-scratch only:
-    pass ``checkpoint.pretrained_checkpoint=null`` to the launcher.
+    Launch with ``--step_func vlm_step``. From-scratch smoke: pass
+    ``checkpoint.pretrained_checkpoint=null``.
     """
-    cfg = _falcon_deepseekv4_mock_2b6_pretrain_base()
-    cfg.model.expert_model_parallel_size = 2
-    return cfg
+    return _falcon_deepseekv4_pretrain_base(falcon_deepseekv4_1b_provider, expert_parallel_size=1)
 
 
-def falcon_deepseekv4_mock_2b6_pretrain_8gpu_h100_bf16_config() -> ConfigContainer:
-    cfg = _falcon_deepseekv4_mock_2b6_pretrain_base()
-    cfg.model.expert_model_parallel_size = 4
-    return cfg
+def falcon_deepseekv4_3b_pretrain_2gpu_h100_bf16_config() -> ConfigContainer:
+    """Return a 2-GPU H100 from-scratch pretrain config for Falcon DSv4 dense ~3B."""
+    return _falcon_deepseekv4_pretrain_base(falcon_deepseekv4_3b_provider, expert_parallel_size=1)
 
 
-def falcon_deepseekv4_mock_2b6_pretrain_2gpu_h100_bf16_cp2_config() -> ConfigContainer:
-    """Return a CP=2 pretrain config for Falcon DSv4 (~2.6B mock).
+def falcon_deepseekv4_10b_pretrain_2gpu_h100_bf16_config() -> ConfigContainer:
+    """Return a 2-GPU H100 from-scratch pretrain config for Falcon DSv4 dense ~10B."""
+    return _falcon_deepseekv4_pretrain_base(falcon_deepseekv4_10b_provider, expert_parallel_size=1)
 
-    Default configuration: 2 GPU
-    - TP=1, PP=1, CP=2 (contiguous partition, D4), EP=1
-    - Energon-native THD packing with pad_to_max_length so every pack width
-      is divisible by the CP size (contiguous partition requirement)
-    - Same data plane, optimizer, and mock sizing as the CP=1 recipe
 
-    Launch with ``--step_func vlm_step``; the step slices each rank's
-    contiguous token window and visual payload batch-side.
+def falcon_deepseekv4_35b_a3b_pretrain_8gpu_h100_bf16_config() -> ConfigContainer:
+    """Return an 8-GPU H100 from-scratch pretrain config for Falcon DSv4 ~35B-A3B MoE.
+
+    Default configuration: 8 GPU
+    - TP=1, PP=1, CP=1, EP=8
+    - Shared Falcon Energon runtime
     """
-    cfg = _falcon_deepseekv4_mock_2b6_pretrain_base()
-    cfg.model.context_parallel_size = 2
-    cfg.model.expert_model_parallel_size = 1
-    cfg.model.cp_partition_mode = "contiguous"
-    # MCore config validation requires a packing-scheduler marker for
-    # contiguous CP. Bridge packs Energon-side, so MCore's scheduler is not
-    # in the data path; this only satisfies the THD-input declaration.
-    cfg.model.sequence_packing_scheduler = "dp_balanced"
-    cfg.dataset.pad_to_max_length = True
-    return cfg
+    return _falcon_deepseekv4_pretrain_base(falcon_deepseekv4_35b_a3b_provider, expert_parallel_size=8)
