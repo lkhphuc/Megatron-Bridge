@@ -120,6 +120,8 @@ def _falcon_deepseekv4_mock_2b6_provider() -> FalconDeepseekv4ModelProvider:
         moe_token_dispatcher_type="alltoall",
         moe_permute_fusion=True,
         moe_shared_expert_overlap=False,
+        # Hash image pads bypass tid2eid via shared expert_bias (text keeps tid2eid).
+        moe_vl_routing=True,
         activation_func_clamp_value=10.0,
         # ---- Parallelism / runtime ----
         tensor_model_parallel_size=1,
@@ -253,16 +255,6 @@ def falcon_deepseekv4_mock_2b6_pretrain_2gpu_h100_bf16_config() -> ConfigContain
 
 
 def falcon_deepseekv4_mock_2b6_pretrain_8gpu_h100_bf16_config() -> ConfigContainer:
-    """Return an 8-GPU from-scratch pretrain config for Falcon DSv4 (~2.6B mock).
-
-    Default configuration: 8 GPU
-    - TP=1, PP=1, CP=1, EP=2, DP=4 (D1-verified expert sharding, scaled out
-      by data parallelism)
-    - Same data plane, optimizer, and mock sizing as the 2-GPU recipe
-
-    From-scratch only: pass ``checkpoint.pretrained_checkpoint=null`` to the
-    launcher. Point ``dataset.path`` at the Energon mixture.
-    """
     cfg = _falcon_deepseekv4_mock_2b6_pretrain_base()
     cfg.model.expert_model_parallel_size = 4
     return cfg

@@ -23,7 +23,6 @@ from megatron.core.extensions.transformer_engine import (
     TENorm,
     TERowParallelLinear,
 )
-from megatron.core.models.hybrid.hybrid_layer_specs import hybrid_dsv4_stack_spec
 from megatron.core.models.hybrid.hybrid_model import HybridModel
 from megatron.core.pipeline_parallel.utils import is_pp_first_stage, is_pp_last_stage
 from megatron.core.transformer.spec_utils import ModuleSpec
@@ -32,6 +31,7 @@ from megatron.core.transformer.transformer_config import MLATransformerConfig
 from megatron.bridge.models.falcon_mm.falcon_deepseekv4_pattern import (
     falcon_deepseekv4_layer_pattern,
 )
+from megatron.bridge.models.falcon_mm.falcon_hybrid_layer_specs import falcon_dsv4_stack_spec
 from megatron.bridge.models.falcon_mm.modelling_falcon_mm.model_deepseekv4 import (
     FalconDeepseekv4Model,
 )
@@ -56,9 +56,10 @@ class FalconDeepseekv4ModelProvider(MLATransformerConfig, HybridModelProvider):
     :class:`MLAModelProvider` combines MLA fields with the GPT provider.
 
     The trunk is a Megatron-Core ``HybridModel`` built with
-    ``hybrid_dsv4_stack_spec`` (MLA + CSA/HCA attention, hash-routed MoE,
-    hyper-connections). The provider adds the Falcon-specific surface on
-    top: the placeholder token id and the patch-embed geometry. DSv4
+    ``falcon_dsv4_stack_spec`` (MLA + CSA/HCA attention, hash-routed MoE,
+    hyper-connections; optional :class:`FalconVLTopKRouter` when
+    ``moe_vl_routing`` is set). The provider adds the Falcon-specific surface
+    on top: the placeholder token id and the patch-embed geometry. DSv4
     architecture constants (attention variant, MLA, gated MoE) are defaulted
     here; size fields (hidden size, layer count, experts) come from the
     recipe or, later, from the HF config through the DSv4 bridge.
@@ -82,6 +83,10 @@ class FalconDeepseekv4ModelProvider(MLATransformerConfig, HybridModelProvider):
         spatial_merge_size: Spatial merge factor of the patch merger; one
             visual token covers merge² patches.
         patch_embed_hidden_size: Width of the patch embed before the merger.
+        moe_vl_routing: When True, hash MoE layers keep ``tid2eid`` for text
+            but route ``image_token_id`` pads via ``topk(scores + expert_bias)``
+            with one shared bias (no ``bias_vl``). Default False preserves
+            text-only DSv4 hash behavior.
     """
 
     MODEL_CLASS: ClassVar[type[HybridModel] | None] = FalconDeepseekv4Model
@@ -93,6 +98,7 @@ class FalconDeepseekv4ModelProvider(MLATransformerConfig, HybridModelProvider):
     in_channels: int = 3
     spatial_merge_size: int = 1
     patch_embed_hidden_size: int = 1024
+    moe_vl_routing: bool = False
 
     # DSv4 architecture constants (mirror deepseek_v4_bridge.provider_bridge)
     experimental_attention_variant: Optional[str] = "dsv4_hybrid"
@@ -106,8 +112,8 @@ class FalconDeepseekv4ModelProvider(MLATransformerConfig, HybridModelProvider):
     moe_grouped_gemm: bool = True
     moe_router_pre_softmax: bool = False
 
-    # DSv4 stack spec (config-aware callable; resolved with this provider)
-    hybrid_stack_spec: Union[ModuleSpec, Callable, None] = hybrid_dsv4_stack_spec
+    # DSv4 stack spec (config-aware callable; VL router when moe_vl_routing)
+    hybrid_stack_spec: Union[ModuleSpec, Callable, None] = falcon_dsv4_stack_spec
 
     def _build_patch_embed_config(self) -> Qwen3VLTransformerConfig:
         """Build the vision config consumed by the Falcon patch embed."""
@@ -134,22 +140,42 @@ class FalconDeepseekv4ModelProvider(MLATransformerConfig, HybridModelProvider):
             config.params_dtype = params_dtype
         return config
 
-    def _fix_hash_layer_numbering(self, model: FalconDeepseekv4Model) -> None:
-        """Re-mark hash-routed MoE layers per HF decoder-layer index.
+    def _ensure_hash_router_expert_bias(self, router) -> None:
+        """Enable shared ``expert_bias`` on a hash router (zeros if absent)."""
+        num_experts = self.num_moe_experts
+        device = router.weight.device
+        router.enable_expert_bias = True
+        if getattr(router, "local_tokens_per_expert", None) is None:
+            if "local_tokens_per_expert" in router.__dict__:
+                del router.local_tokens_per_expert
+            router.register_buffer(
+                "local_tokens_per_expert",
+                torch.zeros(num_experts, dtype=torch.float32, device=device),
+                persistent=False,
+            )
+        if getattr(router, "expert_bias", None) is None:
+            if "expert_bias" in router.__dict__:
+                del router.expert_bias
+            router.register_buffer(
+                "expert_bias",
+                torch.zeros(num_experts, dtype=torch.float32, device=device),
+            )
+
+    def _configure_moe_routers(self, model: FalconDeepseekv4Model) -> None:
+        """Re-mark hash MoE layers and optionally enable VL shared expert bias.
 
         HybridStack assigns one ``layer_number`` per pattern symbol, so the
         MoE sublayer of HF decoder layer ``n`` sits at hybrid index
         ``2n + 1`` with ``layer_number = 2n + 2``. Core's hash check
         (``layer_number <= moe_n_hash_layers``) then marks the wrong layers:
         the split attention/MLP pattern shifts every MoE layer out of the
-        hash range. The hybrid DSv4 path has no upstream hash coverage (no
-        hybrid DSv4 config sets hash layers at this time), so correct the
-        flags here: enable hash routing with a ``tid2eid`` buffer on the
-        first ``moe_n_hash_layers`` decoder layers, and disable the expert
-        bias there (matching core's hash-layer router shape). The buffer is
-        initialized round-robin as a placeholder; the bridge overwrites it
-        with the checkpoint table on import. Tracked in
-        ``FALCON_MM_AGENT_NOTES/5-deepseek-v4-backbone-plan.md``.
+        hash range. Correct the flags here: enable hash routing with a
+        ``tid2eid`` buffer on the first ``moe_n_hash_layers`` decoder layers.
+
+        Without ``moe_vl_routing``, disable expert bias on those hash layers
+        (matching Core). With ``moe_vl_routing``, keep ``tid2eid`` for text,
+        ensure a shared ``expert_bias`` (zeros when absent from a text-only
+        checkpoint), and stamp ``image_token_id`` for image-pad bypass.
         """
         num_hash_layers = self.moe_n_hash_layers or 0
         if num_hash_layers <= 0:
@@ -157,21 +183,34 @@ class FalconDeepseekv4ModelProvider(MLATransformerConfig, HybridModelProvider):
         for hf_index in range(num_hash_layers):
             hybrid_index = 2 * hf_index + 1
             router = model.language_model.decoder.layers[hybrid_index].inner_layer.mlp.router
-            if router.is_hash_layer and router.tid2eid is not None:
-                continue
-            router.is_hash_layer = True
-            router.enable_expert_bias = False
-            router.expert_bias = None
-            if router.tid2eid is None:
-                # The non-hash branch sets a plain ``tid2eid = None`` attribute,
-                # which blocks register_buffer under the same name.
-                if "tid2eid" in router.__dict__:
-                    del router.tid2eid
-                ids = torch.arange(self.actual_vocab_size, device=router.weight.device)
-                tid2eid = torch.stack(
-                    [(ids + k) % self.num_moe_experts for k in range(self.moe_router_topk)], dim=1
-                ).to(torch.int32)
-                router.register_buffer("tid2eid", tid2eid)
+            already_hash = router.is_hash_layer and router.tid2eid is not None
+            if not already_hash:
+                router.is_hash_layer = True
+                if router.tid2eid is None:
+                    # The non-hash branch sets a plain ``tid2eid = None`` attribute,
+                    # which blocks register_buffer under the same name.
+                    if "tid2eid" in router.__dict__:
+                        del router.tid2eid
+                    ids = torch.arange(self.actual_vocab_size, device=router.weight.device)
+                    tid2eid = torch.stack(
+                        [(ids + k) % self.num_moe_experts for k in range(self.moe_router_topk)],
+                        dim=1,
+                    ).to(torch.int32)
+                    router.register_buffer("tid2eid", tid2eid)
+
+            if self.moe_vl_routing:
+                setattr(router, "moe_vl_routing", True)
+                setattr(router, "image_token_id", self.image_token_id)
+                ensure_bias = getattr(router, "_ensure_shared_expert_bias", None)
+                if callable(ensure_bias):
+                    ensure_bias()
+                else:
+                    self._ensure_hash_router_expert_bias(router)
+            else:
+                router.enable_expert_bias = False
+                router.expert_bias = None
+                if hasattr(router, "local_tokens_per_expert"):
+                    router.local_tokens_per_expert = None
 
     def provide(self, pre_process=None, post_process=None, vp_stage=None) -> FalconDeepseekv4Model:
         """Configure and instantiate the Falcon DSv4 multimodal model.
@@ -242,5 +281,5 @@ class FalconDeepseekv4ModelProvider(MLATransformerConfig, HybridModelProvider):
             pg_collection=self._pg_collection,
             vp_stage=vp_stage,
         )
-        self._fix_hash_layer_numbering(model)
+        self._configure_moe_routers(model)
         return model

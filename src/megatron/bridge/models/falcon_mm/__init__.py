@@ -23,11 +23,16 @@ from megatron.bridge.models.falcon_mm.falcon_deepseekv4_pattern import (
 from megatron.bridge.models.falcon_mm.falcon_deepseekv4_provider import (
     FalconDeepseekv4ModelProvider,
 )
+from megatron.bridge.models.falcon_mm.falcon_hybrid_layer_specs import (
+    falcon_dsv4_stack_spec,
+    falcon_hybrid_dsv4_vl_stack_spec,
+)
 from megatron.bridge.models.falcon_mm.falcon_qwen35_provider import (
     FalconQwen35ModelProvider,
     FalconQwen35MoEModelProvider,
     falcon_qwen35_provider_from_qwen35_vl,
 )
+from megatron.bridge.models.falcon_mm.falcon_vl_router import FalconVLTopKRouter
 from megatron.bridge.models.falcon_mm.modelling_falcon_mm import (
     FalconDeepseekv4Model,
     FalconPatchEmbedVisionModel,
@@ -43,6 +48,9 @@ __all__ = [
     "FalconQwen35Model",
     "FalconQwen35ModelProvider",
     "FalconQwen35MoEModelProvider",
+    "FalconVLTopKRouter",
     "falcon_deepseekv4_layer_pattern",
+    "falcon_dsv4_stack_spec",
+    "falcon_hybrid_dsv4_vl_stack_spec",
     "falcon_qwen35_provider_from_qwen35_vl",
 ]

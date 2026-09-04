@@ -15,12 +15,12 @@
 """Unit tests for the Falcon-MM DeepSeek-V4 provider (encoder-free DSv4 trunk)."""
 
 import pytest
-from megatron.core.models.hybrid.hybrid_layer_specs import hybrid_dsv4_stack_spec
 
 from megatron.bridge.models.falcon_mm import (
     FalconDeepseekv4Model,
     FalconDeepseekv4ModelProvider,
     falcon_deepseekv4_layer_pattern,
+    falcon_dsv4_stack_spec,
 )
 
 
@@ -64,7 +64,8 @@ class TestFalconDeepseekv4ModelProvider:
         assert provider.qk_layernorm is True
         assert provider.gated_linear_unit is True
         assert provider.position_embedding_type == "rope"
-        assert provider.hybrid_stack_spec is hybrid_dsv4_stack_spec
+        assert provider.hybrid_stack_spec is falcon_dsv4_stack_spec
+        assert provider.moe_vl_routing is False
 
     def test_falcon_surface_defaults(self):
         provider = _minimal_dsv4_provider()
