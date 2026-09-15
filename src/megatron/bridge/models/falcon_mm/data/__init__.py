@@ -13,6 +13,7 @@
 # limitations under the License.
 
 from megatron.bridge.models.falcon_mm.data.cookers import (
+    FALCON_CRUDE_TYPE_CAPTION,
     FALCON_CRUDE_TYPE_KEY,
     FALCON_CRUDE_TYPE_MINT,
     FALCON_CRUDE_TYPE_TEXT,
@@ -22,6 +23,7 @@ from megatron.bridge.models.falcon_mm.data.cookers import (
     FALCON_DEFAULT_TEMPORAL_PATCH_SIZE,
     FalconDocumentSample,
     FalconPendingSample,
+    cook_caption_pair,
     cook_mint_interleaved,
     cook_text_document,
 )
@@ -38,6 +40,7 @@ from megatron.bridge.models.falcon_mm.data.visual_markers import (
 
 
 __all__ = [
+    "FALCON_CRUDE_TYPE_CAPTION",
     "FALCON_CRUDE_TYPE_KEY",
     "FALCON_CRUDE_TYPE_MINT",
     "FALCON_CRUDE_TYPE_TEXT",
@@ -53,6 +56,7 @@ __all__ = [
     "FalconPendingSample",
     "FalconTaskEncoder",
     "VisualMarkerIds",
+    "cook_caption_pair",
     "cook_mint_interleaved",
     "cook_text_document",
 ]

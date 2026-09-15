@@ -28,6 +28,11 @@ set -euo pipefail
 export OMP_NUM_THREADS=8
 export NCCL_DEBUG=WARN
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export TRITON_PTXAS_PATH=/usr/local/cuda/bin/ptxas
+export CUDA_HOME=/usr/local/cuda
+export CUDA_PATH=/usr/local/cuda
+export CPATH=/usr/local/cuda/include${CPATH:+:$CPATH}
+export CPATH="${CUDA_HOME}/targets/x86_64-linux/include/cccl${CPATH:+:$CPATH}"
 
 WORKSPACE=${WORKSPACE:-~/phuc}
 ENERGON_PATH=${ENERGON_PATH:-${WORKSPACE}/Megatron-Bridge/examples/models/falcon_mm/pretrain_mixture.yaml}

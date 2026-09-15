@@ -25,6 +25,7 @@ from megatron.energon.edataclass import edataclass
 from megatron.bridge.data.energon.task_encoder_utils import ChatMLSample
 from megatron.bridge.models.falcon_mm.data.images import (
     ImageDocument,
+    ImagePageRef,
     assemble_mint_sequence,
 )
 
@@ -32,6 +33,10 @@ from megatron.bridge.models.falcon_mm.data.images import (
 FALCON_CRUDE_TYPE_KEY = "crude_type"
 FALCON_CRUDE_TYPE_MINT = "mint"
 FALCON_CRUDE_TYPE_TEXT = "text"
+FALCON_CRUDE_TYPE_CAPTION = "caption"
+
+# Prefer LAION / CC12M ``jpg``; fall back to other single-image WDS members.
+_CAPTION_IMAGE_MEMBER_KEYS = ("jpg", "jpeg", "png", "webp")
 
 SUBFLAVOR_MAX_PIXELS = "max_pixels"
 SUBFLAVOR_MIN_PIXELS = "min_pixels"
@@ -154,6 +159,53 @@ def cook_text_document(sample: dict[str, Any]) -> FalconDocumentSample:
     return FalconDocumentSample(
         **basic_sample_keys(sample),
         sequence=[payload["text"]],
+    )
+
+
+def _parse_caption_text(payload: Any) -> str:
+    """Decode a crude ``txt`` member to a stripped UTF-8 caption string."""
+    if isinstance(payload, (bytes, bytearray)):
+        text = bytes(payload).decode("utf-8")
+    elif isinstance(payload, str):
+        text = payload
+    else:
+        raise TypeError(f"Caption txt member must be bytes or str; got {type(payload).__name__}")
+    return text.strip()
+
+
+def _extract_caption_image_payload(sample: dict[str, Any]) -> Any:
+    """Return the first present image member among common WebDataset suffixes."""
+    for key in _CAPTION_IMAGE_MEMBER_KEYS:
+        if key in sample and sample[key] is not None:
+            return sample[key]
+    raise ValueError(
+        "Caption sample must include one of "
+        f"{_CAPTION_IMAGE_MEMBER_KEYS}; got keys {sorted(sample)!r} for "
+        f"{sample.get('__key__')!r}."
+    )
+
+
+@stateless
+def cook_caption_pair(sample: dict[str, Any]) -> FalconDocumentSample:
+    """Cook a crude image+caption WebDataset sample (CC12M: ``jpg`` + ``txt``).
+
+    Builds ``[ImagePageRef, caption]`` so the encoder emits image markers then
+    the caption text. Optional ``json`` metadata is ignored.
+    """
+    if "txt" not in sample or sample["txt"] is None:
+        raise ValueError(f"Caption sample missing 'txt' member for key {sample.get('__key__')!r}.")
+    caption = _parse_caption_text(sample["txt"])
+    if not caption:
+        raise ValueError(f"Caption sample has empty 'txt' for key {sample.get('__key__')!r}.")
+    document = _parse_image_member(_extract_caption_image_payload(sample))
+    if len(document.page_sizes) != 1:
+        raise ValueError(
+            f"Caption image must be a single page; got {len(document.page_sizes)} pages "
+            f"for key {sample.get('__key__')!r}."
+        )
+    return FalconDocumentSample(
+        **basic_sample_keys(sample),
+        sequence=[ImagePageRef(document, 0), caption],
     )
 
 

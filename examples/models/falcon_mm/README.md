@@ -9,6 +9,7 @@ style, native THD packing). Code: `src/megatron/bridge/models/falcon_mm/data/`.
 | Source              | On-disk format                              | Energon loader                  | `subflavors.crude_type` | Cooker                  |
 | ------------------- | ------------------------------------------- | ------------------------------- | ----------------------- | ----------------------- |
 | MINT-1T-ArXiv       | tar webdataset: `<key>.json` + `<key>.tiff` | `CrudeWebdataset`               | `mint`                  | `cook_mint_interleaved` |
+| CC12M (caption)     | tar webdataset: `<key>.jpg` + `<key>.txt`   | `CrudeWebdataset`               | `caption`               | `cook_caption_pair`     |
 | Text-only (FineWeb) | JSONL lines `{"text": "..."}`               | crude JSONL / `CrudeWebdataset` | `text`                  | `cook_text_document`    |
 | ChatML (mock)       | `conversation.json` (+ media)               | `ChatMLWebdataset`              | —                       | Qwen ChatML path        |
 
@@ -21,6 +22,10 @@ parallel `texts`/`images`; non-`None` `images[i]` means tiff page *k* (and
 `captions[k]`) follows `texts[i]`. The cooker builds
 `FalconDocumentSample.sequence` with text strings and header-only
 `ImagePageRef`s (no pixel decode at load).
+
+CC12M (and other LAION-style caption WDS) is a single image–text pair per
+sample: optional `.json` metadata is ignored; the cooker builds
+`[ImagePageRef, caption]`.
 
 Per-source image budgets (area = H×W, not edge length) live in `subflavors`.
 Encoder defaults use early-fusion patchify
@@ -65,7 +70,44 @@ subflavors:
 
 
 
-## 2. Prepare FineWeb text (parquet → JSONL)
+## 2. Prepare CC12M captions (jpg + txt WebDataset)
+
+```bash
+# Full dump is ~1.2 TB; pull a subset of shards first if needed.
+hf download --repo-type dataset laion/conceptual-captions-12m-webdataset \
+  --include "data/00000.tar" "data/00001.tar" \
+  --local-dir /mnt/datasets/conceptual-captions-12m-webdataset
+
+# Or a brace range (example: first 10 shards):
+# hf download --repo-type dataset laion/conceptual-captions-12m-webdataset \
+#   --include "data/0000{0..9}.tar" \
+#   --local-dir /mnt/datasets/conceptual-captions-12m-webdataset
+
+# Index in place. Choose: 11. Crude sample (plain dict for cooking)
+# Upstream last shard data/01099.tar is missing tar end-of-archive
+# (two 512-byte zero blocks); Energon fails with
+# "Unexpected EOF while reading header" until you append them:
+#   printf '\0%.0s' {1..1024} >> /mnt/datasets/conceptual-captions-12m-webdataset/data/01099.tar
+energon prepare /mnt/datasets/conceptual-captions-12m-webdataset/data \
+  --fix-duplicates --non-interactive --split-ratio 98,1,1 \
+  --sample-type CrudeWebdataset --force-overwrite
+```
+
+Then edit `.nv-meta/dataset.yaml` (under the prepared path) to:
+
+```yaml
+__module__: megatron.energon
+__class__: CrudeWebdataset
+subflavors:
+  crude_type: caption
+  max_pixels: 1048576
+```
+
+Each sample is `{key}.jpg` + `{key}.txt` (+ optional `{key}.json` with width/height).
+
+
+
+## 3. Prepare FineWeb text (parquet → JSONL)
 
 Energon does not load FineWeb parquet natively yet; convert each parquet to
 JSONL with a string `"text"` field, then prepare.
@@ -119,7 +161,7 @@ JSONL prepare does **not** create `.nv-meta/dataset.yaml` — only the `.idx`.
 Put `crude_type: text` on the Metadataset blend entry. Mixture `path` must be
 the `.jsonl` **file** (Option A) or each shard path (Option B), not the folder.
 
-## 3. Sample Metadataset mixture
+## 4. Sample Metadataset mixture
 
 Save as e.g. `/mnt/datasets/falcon_pretrain_mixture.yaml` and point training at
 it with `dataset.path=/mnt/datasets/falcon_pretrain_mixture.yaml`.
@@ -140,6 +182,11 @@ splits:
           crude_type: mint
           max_pixels: 1048576
       - weight: 1.0
+        path: /mnt/datasets/conceptual-captions-12m-webdataset/data
+        subflavors:
+          crude_type: caption
+          max_pixels: 1048576
+      - weight: 1.0
         path: /mnt/datasets/fineweb/sample-10BT-all.jsonl
         subflavors:
           crude_type: text
@@ -150,6 +197,12 @@ splits:
         split_part: val
         subflavors:
           crude_type: mint
+          max_pixels: 1048576
+      - weight: 1.0
+        path: /mnt/datasets/conceptual-captions-12m-webdataset/data
+        split_part: val
+        subflavors:
+          crude_type: caption
           max_pixels: 1048576
       - weight: 1.0
         path: /mnt/datasets/fineweb/sample-10BT-all.jsonl

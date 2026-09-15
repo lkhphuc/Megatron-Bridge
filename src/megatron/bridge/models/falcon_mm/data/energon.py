@@ -16,7 +16,7 @@
 
 Per-sample work is split so packing can group samples without decoding pixels:
 
-- Crude cookers assemble MINT / JSONL documents without pixel decode.
+- Crude cookers assemble MINT / CC12M caption / JSONL documents without pixel decode.
 - ``preencode_sample`` (Energon pre-pack map) computes an **exact** packing length
   from the tokenizer plus image-header geometry / ``min_pixels`` /
   ``max_pixels`` / patch-merge config (and optional ``max_num_images``), and
@@ -53,6 +53,7 @@ from megatron.bridge.data.energon.task_encoder_utils import ChatMLSample
 from megatron.bridge.data.packing.algorithms import first_fit_decreasing
 from megatron.bridge.data.token_utils import extract_skipped_token_ids
 from megatron.bridge.models.falcon_mm.data.cookers import (
+    FALCON_CRUDE_TYPE_CAPTION,
     FALCON_CRUDE_TYPE_KEY,
     FALCON_CRUDE_TYPE_MINT,
     FALCON_CRUDE_TYPE_TEXT,
@@ -65,6 +66,7 @@ from megatron.bridge.models.falcon_mm.data.cookers import (
     SUBFLAVOR_MIN_PIXELS,
     FalconDocumentSample,
     FalconPendingSample,
+    cook_caption_pair,
     cook_mint_interleaved,
     cook_text_document,
     resolve_subflavor_int,
@@ -356,6 +358,7 @@ class FalconTaskEncoder(QwenVLTaskEncoder):
 
     cookers: Sequence[Cooker[FalconDocumentSample | ChatMLSample]] = [
         Cooker(cook_mint_interleaved, has_subflavors={FALCON_CRUDE_TYPE_KEY: FALCON_CRUDE_TYPE_MINT}),
+        Cooker(cook_caption_pair, has_subflavors={FALCON_CRUDE_TYPE_KEY: FALCON_CRUDE_TYPE_CAPTION}),
         Cooker(cook_text_document, has_subflavors={FALCON_CRUDE_TYPE_KEY: FALCON_CRUDE_TYPE_TEXT}),
     ]
 

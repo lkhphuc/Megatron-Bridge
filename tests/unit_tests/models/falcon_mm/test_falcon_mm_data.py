@@ -30,6 +30,7 @@ from megatron.bridge.models.falcon_mm.data import (
     FalconTaskEncoder,
 )
 from megatron.bridge.models.falcon_mm.data.cookers import (
+    FALCON_CRUDE_TYPE_CAPTION,
     FALCON_CRUDE_TYPE_KEY,
     FALCON_CRUDE_TYPE_MINT,
     FALCON_CRUDE_TYPE_TEXT,
@@ -39,6 +40,7 @@ from megatron.bridge.models.falcon_mm.data.cookers import (
     FALCON_DEFAULT_TEMPORAL_PATCH_SIZE,
     FalconDocumentSample,
     FalconPendingSample,
+    cook_caption_pair,
     cook_mint_interleaved,
     cook_text_document,
 )
@@ -124,6 +126,12 @@ def _tiff_bytes(*sizes: tuple[int, int]) -> bytes:
     return buffer.getvalue()
 
 
+def _jpeg_bytes(size: tuple[int, int] = (8, 8)) -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", size, "blue").save(buffer, format="JPEG")
+    return buffer.getvalue()
+
+
 def _crude_sample(payload, *, subflavors=None):
     return {
         "json": payload,
@@ -206,6 +214,44 @@ class TestMintAndImages:
         assert cooked.sequence[4].size == (8, 2)
         assert cooked.sequence[5] == "cap2"
 
+    def test_cook_caption_pair_jpg_txt(self):
+        cooked = cook_caption_pair(
+            {
+                "__key__": "00000000",
+                "__restore_key__": ("shard", 0),
+                "__subflavors__": {FALCON_CRUDE_TYPE_KEY: FALCON_CRUDE_TYPE_CAPTION},
+                "jpg": _jpeg_bytes((16, 12)),
+                "txt": b"a blue square\n",
+                "json": {"width": 16, "height": 12},
+            }
+        )
+        assert isinstance(cooked, FalconDocumentSample)
+        assert len(cooked.sequence) == 2
+        assert isinstance(cooked.sequence[0], ImagePageRef)
+        assert cooked.sequence[0].size == (16, 12)
+        assert cooked.sequence[1] == "a blue square"
+
+        with pytest.raises(ValueError, match="empty 'txt'"):
+            cook_caption_pair(
+                {
+                    "__key__": "empty",
+                    "__restore_key__": ("shard", 1),
+                    "__subflavors__": {FALCON_CRUDE_TYPE_KEY: FALCON_CRUDE_TYPE_CAPTION},
+                    "jpg": _jpeg_bytes(),
+                    "txt": "   ",
+                }
+            )
+
+        with pytest.raises(ValueError, match="one of"):
+            cook_caption_pair(
+                {
+                    "__key__": "noimg",
+                    "__restore_key__": ("shard", 2),
+                    "__subflavors__": {FALCON_CRUDE_TYPE_KEY: FALCON_CRUDE_TYPE_CAPTION},
+                    "txt": "caption only",
+                }
+            )
+
     def test_image_document_headers_and_target_decode(self):
         document = ImageDocument.from_bytes(_tiff_bytes((200, 100)))
         assert document.page_sizes == ((200, 100),)
@@ -246,11 +292,13 @@ class TestFalconTaskEncoder:
     def test_cookers_and_pack_then_decode(self):
         processor = _make_document_processor()
         encoder = self._make_encoder(processor=processor, enable_energon_packing=True)
-        assert len(encoder.cookers) == 2
+        assert len(encoder.cookers) == 3
         assert encoder.cookers[0].has_subflavors == {FALCON_CRUDE_TYPE_KEY: FALCON_CRUDE_TYPE_MINT}
         assert encoder.cookers[0].cook is cook_mint_interleaved
-        assert encoder.cookers[1].has_subflavors == {FALCON_CRUDE_TYPE_KEY: FALCON_CRUDE_TYPE_TEXT}
-        assert encoder.cookers[1].cook is cook_text_document
+        assert encoder.cookers[1].has_subflavors == {FALCON_CRUDE_TYPE_KEY: FALCON_CRUDE_TYPE_CAPTION}
+        assert encoder.cookers[1].cook is cook_caption_pair
+        assert encoder.cookers[2].has_subflavors == {FALCON_CRUDE_TYPE_KEY: FALCON_CRUDE_TYPE_TEXT}
+        assert encoder.cookers[2].cook is cook_text_document
 
         sample = _crude_sample({"text": "hello world"}, subflavors={"max_pixels": 262144})
         pending = encoder.preencode_sample(sample)
