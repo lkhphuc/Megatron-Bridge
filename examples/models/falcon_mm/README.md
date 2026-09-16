@@ -255,6 +255,41 @@ sample size differs a lot from typical MINT pages.
 
 
 
+## DSv4 multimodal RoPE (mRoPE)
+
+The Falcon DSv4 trunk enables Qwen3.5-compatible multimodal RoPE by default:
+
+- Provider gate: ``mrope_section=[11, 11, 10]`` with ``mrope_interleaved=True``.
+  Keep ``position_embedding_type="rope"`` (DSv4 uses layer-local rotary
+  modules; do not switch the embedding type literal to ``mrope``).
+- Position shape: ``[3, B, S]`` axes = temporal / height / width. Text-only
+  tokens use equal T/H/W (scalar RoPE equivalence). Visual tokens use distinct
+  H/W coordinates from ``image_grid_thw``.
+- Construction: ``FalconDeepseekv4Model`` (and contiguous-CP ``vlm_step``)
+  reuses Qwen's ``get_rope_index`` with DSv4 marker ids
+  (``vision_start=128001``, ``image_pad=128000``). Ordinary 2D dataloader
+  arange rows are ignored when mRoPE is enabled.
+- Contiguous CP: tokens and visual payloads are rank-local; ``position_ids``
+  stay global on every CP rank. Set ``mrope_section=None`` to restore legacy
+  scalar DSv4 RoPE/YaRN without multimodal indices.
+
+Video inputs remain rejected on this trunk.
+
+
+## DSv4 hash MoE + VL routing (`moe_vl_routing`)
+
+Text-only DeepSeek-V4 hash layers route with frozen `tid2eid[input_ids]`.
+Identical `image_pad` ids would otherwise collapse every visual token onto the
+same experts. Falcon opt-in `moe_vl_routing=True` (default on the shipped DSv4
+multimodal recipes) keeps text on `tid2eid` and routes `image_token_id` pads
+with `topk(scores + expert_bias)` using **one shared** `expert_bias` (no
+`bias_vl`). Non-hash layers are unchanged and still use fused top-k with that
+same bias. Hash-layer bias starts at zeros when loading a text base that has
+no hash bias keys. This is **not** weight-compatible with DeepSeek Vision-Exp
+dual-bias checkpoints.
+
+
+
 ## Todo
 
 - Native parquet / Energon 8 (drop FineWeb JSONL conversion).

@@ -22,7 +22,9 @@ hMLP merger) and the placeholder-span scatter contract:
   handling — and replaces only the vision tower with the patch embed.
 - :class:`FalconDeepseekv4Model` composes the patch embed with a
   Megatron-Core ``HybridModel`` DSv4 trunk, following the Nemotron Omni
-  wrapper pattern.
+  wrapper pattern. When ``mrope_section`` is set (default ``[11, 11, 10]``),
+  the wrapper builds Qwen-compatible T/H/W position ids for every DSv4
+  attention layer.
 """
 
 from megatron.bridge.models.falcon_mm.modelling_falcon_mm.model import (

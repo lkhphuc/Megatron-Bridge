@@ -51,6 +51,11 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.bridge.models.falcon_mm.modelling_falcon_mm.model import (
     FalconPatchEmbedVisionModel,
 )
+from megatron.bridge.models.falcon_mm.rope import (
+    FALCON_DSV4_UNUSED_VIDEO_TOKEN_ID,
+    FALCON_DSV4_VISION_START_TOKEN_ID,
+    resolve_falcon_dsv4_mrope_position_ids,
+)
 from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.utils import (
     PatchMergerSubmodules,
 )
@@ -96,6 +101,8 @@ class FalconDeepseekv4Model(MegatronModule):
             and linear layers (TP-safe TE modules).
         image_token_id (int): Placeholder token id whose embedding positions
             receive the patch embeddings (DSv4 reserved token 128000).
+        vision_start_token_id (int): Vision-start marker id for mRoPE index
+            construction (DSv4 reserved token 128001).
         parallel_output (bool): Keep output logits split across TP ranks.
         share_embeddings_and_output_weights (bool): Tie input/output
             embeddings.
@@ -124,6 +131,7 @@ class FalconDeepseekv4Model(MegatronModule):
         patch_embed_config: TransformerConfig,
         patch_merger_spec: PatchMergerSubmodules,
         image_token_id: int,
+        vision_start_token_id: int = FALCON_DSV4_VISION_START_TOKEN_ID,
         parallel_output: bool = True,
         share_embeddings_and_output_weights: bool = False,
         pre_process: bool = True,
@@ -136,7 +144,10 @@ class FalconDeepseekv4Model(MegatronModule):
         self.pre_process = pre_process
         self.post_process = post_process
         self.image_token_id = image_token_id
+        self.vision_start_token_id = vision_start_token_id
+        self.video_token_id = FALCON_DSV4_UNUSED_VIDEO_TOKEN_ID
         self.sequence_parallel_lm = language_transformer_config.sequence_parallel
+        self.spatial_merge_size = int(getattr(language_transformer_config, "spatial_merge_size", 1))
 
         if pg_collection is None:
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
@@ -217,9 +228,14 @@ class FalconDeepseekv4Model(MegatronModule):
         On the first pipeline stage: look up token embeddings, embed the
         pixel patches, and scatter the patch embeddings into the placeholder
         spans (``input_ids == image_token_id``). Then run the DSv4 trunk with
-        the merged embeddings as ``decoder_input``. Positions are ordinary
-        1D rope positions handled inside the DSv4 attention modules from the
-        packed metadata — there is no MRoPE on this trunk.
+        the merged embeddings as ``decoder_input``.
+
+        When ``config.mrope_section`` is set, this wrapper builds or accepts
+        Qwen-compatible ``[3, B, S]`` T/H/W position ids and forwards them to
+        HybridModel so every DSv4 attention layer applies multimodal RoPE.
+        Ordinary 2D dataloader arange rows are ignored in favor of recomputing
+        from ``input_ids`` and image grids. Contiguous CP requires global
+        positions prepared before token partitioning (see ``vlm_step``).
 
         Returns the per-token loss when ``labels`` are given, otherwise the
         final hidden states or logits, matching the ``HybridModel`` contract.
@@ -261,6 +277,25 @@ class FalconDeepseekv4Model(MegatronModule):
         if packed_seq_params is not None:
             # THD packs carry their causal structure in cu_seqlens.
             attention_mask = None
+
+        if getattr(self.config, "mrope_section", None) is not None:
+            cp_size = self.pg_collection.cp.size()
+            cp_mode = None
+            if packed_seq_params is not None:
+                cp_mode = getattr(packed_seq_params, "cp_partition_mode", None)
+            require_global = cp_size > 1 and cp_mode == "contiguous"
+            position_ids = resolve_falcon_dsv4_mrope_position_ids(
+                position_ids,
+                input_ids,
+                spatial_merge_size=self.spatial_merge_size,
+                image_token_id=self.image_token_id,
+                vision_start_token_id=self.vision_start_token_id,
+                video_token_id=self.video_token_id,
+                image_grid_thw=image_grid_thw,
+                video_grid_thw=None,
+                packed_seq_params=packed_seq_params,
+                require_global_positions=require_global,
+            )
 
         # input_ids rides along for hash-routed MoE layers, which route by
         # token id. The embedding lookup is skipped because decoder_input is

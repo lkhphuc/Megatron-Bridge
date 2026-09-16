@@ -64,12 +64,15 @@ class TestFalconDeepseekv4ModelProvider:
         assert provider.qk_layernorm is True
         assert provider.gated_linear_unit is True
         assert provider.position_embedding_type == "rope"
+        assert provider.mrope_section == [11, 11, 10]
+        assert provider.mrope_interleaved is True
         assert provider.hybrid_stack_spec is falcon_dsv4_stack_spec
         assert provider.moe_vl_routing is False
 
     def test_falcon_surface_defaults(self):
         provider = _minimal_dsv4_provider()
         assert provider.image_token_id == 128000
+        assert provider.vision_start_token_id == 128001
         assert provider.patch_size == 32
         assert provider.temporal_patch_size == 1
         assert provider.spatial_merge_size == 1

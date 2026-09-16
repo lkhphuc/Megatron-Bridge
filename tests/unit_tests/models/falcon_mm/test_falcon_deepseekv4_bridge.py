@@ -270,6 +270,8 @@ class TestProviderBridge:
         assert out.o_lora_rank == 1024
         assert out.rotary_percent == 1.0
         assert out.rope_type == "yarn"
+        assert out.mrope_section == [11, 11, 10]
+        assert out.mrope_interleaved is True
         assert out.moe_n_hash_layers == 1
         assert out.mtp_num_layers == 0
         assert out.csa_compress_ratios == [0, 4]

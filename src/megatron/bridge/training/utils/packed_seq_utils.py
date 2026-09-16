@@ -47,6 +47,9 @@ _SEQLEN_KEYS = frozenset(
         "attention_mask",
     }
 )
+# Global rotary metadata for contiguous CP (DSv4 mRoPE). Tokens are rank-local
+# but position_ids stay replicated over the full physical pack.
+_CONTIGUOUS_CP_GLOBAL_KEYS = frozenset({"position_ids", "cp_partition_mode"})
 _MIN_MCORE_THD_CP_VERSION = PkgVersion("0.18.0")
 
 
@@ -58,11 +61,13 @@ def partition_packed_batch_contiguous(
 ) -> dict[str, torch.Tensor]:
     """Slice a consecutive [start, end) token window for this CP rank.
 
-    Only data tensors (tokens, labels, loss_mask, position_ids, etc.) are sliced.
-    Sequence-length metadata (cu_seqlens, max_seqlen, ...) is intentionally kept
-    at global values — the DSv4 CSA compressor needs global sequence boundaries to
-    correctly exchange boundary hidden states between adjacent CP ranks.
-    This mirrors how zigzag mode leaves cu_seqlens untouched.
+    Only data tensors (tokens, labels, loss_mask, etc.) are sliced.
+    Sequence-length metadata (cu_seqlens, max_seqlen, ...) and rotary
+    ``position_ids`` are intentionally kept at global values — the DSv4 CSA
+    compressor needs global sequence boundaries, and multimodal RoPE requires
+    replicated global T/H/W coordinates under contiguous CP (rank-local tokens
+    select rows from the full position tensor). This mirrors how zigzag mode
+    leaves cu_seqlens untouched.
 
     The packed sequence length must be divisible by cp_size — ensure
     packed_sequence_size = N * cp_size when running pack_sft_data.
@@ -78,7 +83,15 @@ def partition_packed_batch_contiguous(
     if cp_rank is None:
         cp_rank = parallel_state.get_context_parallel_rank()
 
-    _data_val = next((v for k, v in batch.items() if v is not None and k not in _SEQLEN_KEYS), None)
+    skip_keys = _SEQLEN_KEYS | _CONTIGUOUS_CP_GLOBAL_KEYS
+    _data_val = next(
+        (
+            v
+            for k, v in batch.items()
+            if v is not None and k not in skip_keys and isinstance(v, torch.Tensor) and v.dim() >= 2
+        ),
+        None,
+    )
     if _data_val is None:
         return batch  # middle PP stage with no data tensors — nothing to slice
 
@@ -94,7 +107,9 @@ def partition_packed_batch_contiguous(
     end = start + local_len
 
     for key, val in batch.items():
-        if val is None or key in _SEQLEN_KEYS:
+        if val is None or key in skip_keys:
+            continue
+        if not isinstance(val, torch.Tensor) or val.dim() < 2:
             continue
         batch[key] = val[:, start:end].contiguous()
 

@@ -14,7 +14,7 @@
 
 """Model provider for the encoder-free Falcon multimodal model on a DSv4 trunk."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, ClassVar, Optional, Union
 
 import torch
@@ -34,6 +34,10 @@ from megatron.bridge.models.falcon_mm.falcon_deepseekv4_pattern import (
 from megatron.bridge.models.falcon_mm.falcon_hybrid_layer_specs import falcon_dsv4_stack_spec
 from megatron.bridge.models.falcon_mm.modelling_falcon_mm.model_deepseekv4 import (
     FalconDeepseekv4Model,
+)
+from megatron.bridge.models.falcon_mm.rope import (
+    FALCON_DSV4_DEFAULT_MROPE_SECTION,
+    FALCON_DSV4_VISION_START_TOKEN_ID,
 )
 from megatron.bridge.models.hybrid.hybrid_provider import HybridModelProvider
 from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.transformer_config import (
@@ -76,6 +80,8 @@ class FalconDeepseekv4ModelProvider(MLATransformerConfig, HybridModelProvider):
     Attributes:
         image_token_id: Placeholder token id whose positions receive the
             patch embeddings.
+        vision_start_token_id: Vision-start marker id used when building
+            Qwen-compatible T/H/W mRoPE indices (DSv4 placeholder 128001).
         patch_size: Spatial patch edge for the Conv3d patchify.
         temporal_patch_size: Temporal patch size for Conv3d patchify
             (Falcon early-fusion default is 1; no frame duplication).
@@ -87,12 +93,19 @@ class FalconDeepseekv4ModelProvider(MLATransformerConfig, HybridModelProvider):
             but route ``image_token_id`` pads via ``topk(scores + expert_bias)``
             with one shared bias (no ``bias_vl``). Default False preserves
             text-only DSv4 hash behavior.
+        mrope_section: T/H/W frequency-pair counts for multimodal RoPE. Default
+            ``[11, 11, 10]`` matches Qwen3.5 for a 64-wide rotary subspace.
+            Set to ``None`` to keep legacy scalar DSv4 RoPE/YaRN.
+        mrope_interleaved: When True (default), use stride-3 T/H/W frequency
+            assignment. Keep ``position_embedding_type="rope"``; DSv4 uses
+            layer-local rotary modules rather than model-level mRoPE embeddings.
     """
 
     MODEL_CLASS: ClassVar[type[HybridModel] | None] = FalconDeepseekv4Model
 
     # Falcon multimodal surface
     image_token_id: int = 128000
+    vision_start_token_id: int = FALCON_DSV4_VISION_START_TOKEN_ID
     patch_size: int = 32
     temporal_patch_size: int = 1
     in_channels: int = 3
@@ -108,6 +121,11 @@ class FalconDeepseekv4ModelProvider(MLATransformerConfig, HybridModelProvider):
     add_bias_linear: bool = False
     rotary_percent: float = 1.0
     position_embedding_type: str = "rope"
+    # Multimodal RoPE (Qwen3.5-compatible). Gate is mrope_section is not None.
+    mrope_section: Optional[list[int]] = field(
+        default_factory=lambda: list(FALCON_DSV4_DEFAULT_MROPE_SECTION)
+    )
+    mrope_interleaved: bool = True
     gated_linear_unit: bool = True
     moe_grouped_gemm: bool = True
     moe_router_pre_softmax: bool = False
@@ -273,6 +291,7 @@ class FalconDeepseekv4ModelProvider(MLATransformerConfig, HybridModelProvider):
             patch_embed_config=self._build_patch_embed_config(),
             patch_merger_spec=patch_merger_spec,
             image_token_id=self.image_token_id,
+            vision_start_token_id=self.vision_start_token_id,
             parallel_output=self.parallel_output,
             share_embeddings_and_output_weights=self.share_embeddings_and_output_weights,
             pre_process=pre_process,

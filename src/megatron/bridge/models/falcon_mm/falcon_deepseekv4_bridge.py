@@ -133,6 +133,16 @@ class FalconDeepseekv4Bridge(DeepSeekV4Bridge):
         provider.beta_slow = float(compress_rope_params.get("beta_slow", 1))
         provider.mscale = 1.0
         provider.mscale_all_dim = 1.0
+        # Multimodal RoPE: keep position_embedding_type="rope"; DSv4 layer-local
+        # rotary modules consume mrope_section independently of model-level type.
+        provider.mrope_section = (
+            rope_params.get("mrope_section")
+            or main_rope_params.get("mrope_section")
+            or [11, 11, 10]
+        )
+        provider.mrope_interleaved = bool(
+            rope_params.get("mrope_interleaved", main_rope_params.get("mrope_interleaved", True))
+        )
 
         # ---- CSA ----
         # Phase 1: no MTP — slice compress ratios to num_hidden_layers only.

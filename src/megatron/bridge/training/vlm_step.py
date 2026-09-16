@@ -44,6 +44,58 @@ from megatron.bridge.training.utils.packed_seq_utils import (
 from megatron.bridge.training.utils.pg_utils import get_pg_collection
 
 
+def _maybe_build_global_mrope_position_ids(
+    batch: dict[str, Any],
+    *,
+    model_cfg: Any,
+) -> None:
+    """Materialize global ``[3, B, S]`` mRoPE ids before contiguous CP slicing.
+
+    Contiguous CP keeps tokens rank-local but requires replicated global
+    positions. Build them from the full packed sequence when the Falcon DSv4
+    (or any) provider enables ``mrope_section`` and the batch does not already
+    carry explicit T/H/W metadata.
+    """
+    mrope_section = getattr(model_cfg, "mrope_section", None)
+    if mrope_section is None:
+        return
+
+    position_ids = batch.get("position_ids")
+    if (
+        isinstance(position_ids, torch.Tensor)
+        and position_ids.dim() == 3
+        and position_ids.size(0) == 3
+    ):
+        return
+
+    tokens = batch.get("tokens") if batch.get("tokens") is not None else batch.get("input_ids")
+    if tokens is None:
+        return
+
+    visual_inputs = batch.get("visual_inputs")
+    image_grid_thw = getattr(visual_inputs, "image_grid_thw", None) if visual_inputs is not None else None
+    video_grid_thw = getattr(visual_inputs, "video_grid_thw", None) if visual_inputs is not None else None
+
+    packed_seq_params = None
+    if batch.get("cu_seqlens_q") is not None:
+        packed_meta = {key: batch[key] for key in _PACKED_SEQ_PARAM_KEYS if batch.get(key) is not None}
+        packed_seq_params = get_packed_seq_params(packed_meta)
+
+    # Lazy import keeps the VLM step free of Falcon-only deps for other trunks
+    # that happen to set mrope_section (Qwen already supplies 3D ids).
+    from megatron.bridge.models.falcon_mm.rope import build_falcon_dsv4_mrope_position_ids
+
+    batch["position_ids"] = build_falcon_dsv4_mrope_position_ids(
+        tokens,
+        spatial_merge_size=int(getattr(model_cfg, "spatial_merge_size", 1)),
+        image_token_id=int(getattr(model_cfg, "image_token_id", 128000)),
+        vision_start_token_id=int(getattr(model_cfg, "vision_start_token_id", 128001)),
+        image_grid_thw=image_grid_thw,
+        video_grid_thw=video_grid_thw,
+        packed_seq_params=packed_seq_params,
+    )
+
+
 _VISUAL_PAYLOAD_FIELDS = frozenset(("pixel_values", "pixel_values_videos"))
 _PACKED_SEQ_DEVICE_KEYS = ("cu_seqlens_q", "cu_seqlens_kv", "cu_seqlens_q_padded", "cu_seqlens_kv_padded")
 _PACKED_SEQ_HOST_KEYS = ("max_seqlen_q", "max_seqlen_kv")
@@ -219,11 +271,13 @@ def get_batch(
     # Contiguous CP (DSv4 CSA): slice this rank's consecutive token window in
     # the step, including the visual payload. Zigzag CP stays model-side
     # (Qwen-style models slice internally). Sequence-length metadata stays
-    # global — the CSA compressor needs full pack boundaries.
+    # global — the CSA compressor needs full pack boundaries. Multimodal RoPE
+    # positions are also global under contiguous CP.
     cp_size = pg_collection.cp.size()
     if batch.get("cu_seqlens_q") is not None and cp_size > 1:
         cp_mode = getattr(cfg.model, "cp_partition_mode", "zigzag")
         if cp_mode == "contiguous":
+            _maybe_build_global_mrope_position_ids(batch, model_cfg=cfg.model)
             full_input_ids = batch.get("tokens") if batch.get("tokens") is not None else batch.get("input_ids")
             local_len = full_input_ids.size(1) // cp_size
             cp_rank = pg_collection.cp.rank()

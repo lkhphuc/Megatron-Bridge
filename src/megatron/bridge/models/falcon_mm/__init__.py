@@ -38,6 +38,10 @@ from megatron.bridge.models.falcon_mm.modelling_falcon_mm import (
     FalconPatchEmbedVisionModel,
     FalconQwen35Model,
 )
+from megatron.bridge.models.falcon_mm.rope import (
+    FALCON_DSV4_DEFAULT_MROPE_SECTION,
+    build_falcon_dsv4_mrope_position_ids,
+)
 
 
 __all__ = [
@@ -49,6 +53,8 @@ __all__ = [
     "FalconQwen35ModelProvider",
     "FalconQwen35MoEModelProvider",
     "FalconVLTopKRouter",
+    "FALCON_DSV4_DEFAULT_MROPE_SECTION",
+    "build_falcon_dsv4_mrope_position_ids",
     "falcon_deepseekv4_layer_pattern",
     "falcon_dsv4_stack_spec",
     "falcon_hybrid_dsv4_vl_stack_spec",
