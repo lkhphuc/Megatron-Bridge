@@ -15,6 +15,8 @@
 """Unit tests for the Falcon-MM DeepSeek-V4 provider (encoder-free DSv4 trunk)."""
 
 import pytest
+import torch
+from megatron.core.utils import get_attr_wrapped_model
 
 from megatron.bridge.models.falcon_mm import (
     FalconDeepseekv4Model,
@@ -108,3 +110,32 @@ class TestFalconDeepseekv4ModelProvider:
         provider.vocab_size = 129280
         with pytest.raises(ValueError, match="csa_compress_ratios"):
             provider.provide(pre_process=True, post_process=True)
+
+    def test_pp_wrapper_surfaces_embedding_gradient_state(self):
+        class _LanguageModel(torch.nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.post_process = True
+                self.embedding_activation_buffer = [torch.ones(1)]
+                self.grad_output_buffer = [torch.ones(1)]
+                self.output_layer = torch.nn.Linear(1, 1, bias=False)
+
+            def shared_embedding_or_output_weight(self) -> torch.nn.Parameter:
+                return self.output_layer.weight
+
+        model = FalconDeepseekv4Model.__new__(FalconDeepseekv4Model)
+        torch.nn.Module.__init__(model)
+        model.pre_process = False
+        model.post_process = True
+        model.share_embeddings_and_output_weights = True
+        model.language_model = _LanguageModel()
+
+        # MCore's attribute resolver stops at this multimodal wrapper for both
+        # PP boundary flags, so every property consumed by embedding-gradient
+        # finalization must be available here.
+        assert get_attr_wrapped_model(model, "pre_process", return_model_obj=True) is model
+        assert get_attr_wrapped_model(model, "post_process", return_model_obj=True) is model
+        assert model.shared_embedding_or_output_weight() is model.language_model.output_layer.weight
+        assert model.embedding_activation_buffer is model.language_model.embedding_activation_buffer
+        assert model.grad_output_buffer is model.language_model.grad_output_buffer
+        assert model.output_layer is model.language_model.output_layer

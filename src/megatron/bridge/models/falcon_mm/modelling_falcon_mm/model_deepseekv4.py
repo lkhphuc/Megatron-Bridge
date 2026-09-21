@@ -143,6 +143,7 @@ class FalconDeepseekv4Model(MegatronModule):
         super().__init__(config=language_transformer_config)
         self.pre_process = pre_process
         self.post_process = post_process
+        self.share_embeddings_and_output_weights = share_embeddings_and_output_weights
         self.image_token_id = image_token_id
         self.vision_start_token_id = vision_start_token_id
         self.video_token_id = FALCON_DSV4_UNUSED_VIDEO_TOKEN_ID
@@ -178,6 +179,32 @@ class FalconDeepseekv4Model(MegatronModule):
             )
             self.vision_model.register_load_state_dict_post_hook(_ignore_transformer_engine_extra_state)
         self.language_model.register_load_state_dict_post_hook(_ignore_transformer_engine_extra_state)
+
+    def shared_embedding_or_output_weight(self) -> torch.nn.Parameter | None:
+        """Return the stage-local shared embedding or output weight.
+
+        Megatron's PP gradient finalization resolves the module carrying
+        ``pre_process`` before looking up this method. Because that resolution
+        stops at this multimodal wrapper, surface the inner HybridModel method
+        here so tied embeddings and MTP can synchronize gradients across PP
+        stages.
+        """
+        return self.language_model.shared_embedding_or_output_weight()
+
+    @property
+    def embedding_activation_buffer(self) -> list[torch.Tensor]:
+        """Expose the inner output-layer activation buffer to PP schedules."""
+        return self.language_model.embedding_activation_buffer
+
+    @property
+    def grad_output_buffer(self) -> list[torch.Tensor]:
+        """Expose the inner output-layer gradient buffer to PP schedules."""
+        return self.language_model.grad_output_buffer
+
+    @property
+    def output_layer(self) -> torch.nn.Module:
+        """Expose the inner output layer used by deferred embedding wgrad."""
+        return self.language_model.output_layer
 
     def set_input_tensor(self, input_tensor) -> None:
         """Set input tensor for pipeline parallelism (non-first stages)."""
