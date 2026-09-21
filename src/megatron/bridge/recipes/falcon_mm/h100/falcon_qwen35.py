@@ -116,6 +116,10 @@ def _apply_falcon_energon_sft_runtime(
     cfg.validation.eval_interval = 500
     cfg.validation.eval_iters = 32
 
+    cfg.logger.log_throughput_to_tensorboard = True
+    cfg.logger.throughput_window_size = 10
+    cfg.logger.console_color = "auto"
+
     # Optimizer
     opt_cfg, scheduler_cfg = distributed_fused_adam_with_cosine_annealing(
         lr_warmup_iters=200,

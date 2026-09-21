@@ -47,6 +47,8 @@ Use the following options to enable additional diagnostics and performance monit
 - **`log_throughput_to_tensorboard`**: Calculates the training throughput and utilization.
 - **`log_runtime_to_tensorboard`**: Estimates total time remaining until the end of the training.
 - **`log_l2_norm_grad_to_tensorboard`**: Computes and logs the L2 norm of gradients for each model layer.
+- **`console_color`**: Colorizes iteration summaries with `"auto"`, `"always"`, or `"never"`. Auto mode respects
+  terminal detection and `NO_COLOR`; the global default is `"never"`.
 
 
 ## Experiment Logging
@@ -436,4 +438,3 @@ Straggler timing reports follow the same `log_interval` cadence, helping identif
 
 To reduce performance impact, set `timing_log_level` to `0`.  
 Increase to `1` or `2` only when more detailed timing metrics are required, as higher levels introduce additional logging overhead.
-

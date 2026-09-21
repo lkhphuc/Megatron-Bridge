@@ -16,6 +16,7 @@ import inspect
 import logging
 import math
 import os
+import sys
 import time
 from collections import defaultdict
 from datetime import datetime
@@ -59,6 +60,49 @@ if TYPE_CHECKING:
 
 
 logger = logging.getLogger(__name__)
+
+_ANSI_RESET = "\033[0m"
+_ANSI_STYLES = {
+    "dim": "\033[2m",
+    "cyan": "\033[1;36m",
+    "green": "\033[1;32m",
+    "yellow": "\033[33m",
+    "magenta": "\033[35m",
+    "red": "\033[1;31m",
+}
+
+
+def _colorize_training_log(message: str, mode: str) -> str:
+    """Apply restrained ANSI styling to a training iteration summary."""
+    if mode not in ("auto", "always") or "NO_COLOR" in os.environ:
+        return message
+    if mode == "auto" and (not sys.stdout.isatty() or os.environ.get("TERM") == "dumb"):
+        return message
+
+    styled_segments = []
+    for index, segment in enumerate(message.split("|")):
+        normalized = segment.lower()
+        style = ""
+        if index == 0:
+            style = _ANSI_STYLES["dim"]
+        if "iteration" in normalized:
+            style = _ANSI_STYLES["cyan"]
+        elif "throughput per gpu" in normalized or "tokens/s/gpu" in normalized:
+            style = _ANSI_STYLES["green"]
+        elif "learning rate" in normalized:
+            style = _ANSI_STYLES["yellow"]
+        elif "loss" in normalized:
+            style = _ANSI_STYLES["magenta"]
+        elif (
+            "skipped iterations" in normalized or "nan iterations" in normalized
+        ) and not normalized.rstrip().endswith(":   0"):
+            style = _ANSI_STYLES["red"]
+        if style:
+            segment = f"{style}{segment}{_ANSI_RESET}"
+        styled_segments.append(segment)
+
+    separator = f"{_ANSI_STYLES['dim']}|{_ANSI_RESET}"
+    return separator.join(styled_segments)
 
 
 def make_value_model(hidden_size: int, sequence_parallel: bool) -> ModelHook:
@@ -848,6 +892,7 @@ def training_log(
         memory_report = reduce_max_memory_across_pp_group(memory_report, pg_collection.pp)
         memory_report = {f"memory/{mem_stat}": val for (mem_stat, val) in memory_report.items()}
 
+    throughput_report: dict[str, Union[int, float]] = {}
     if loggers_exist and iteration % logger_config.tensorboard_log_interval == 0:
         if logger_config.log_throughput_to_tensorboard:
             throughput_report = report_throughput(
@@ -1201,6 +1246,9 @@ def training_log(
 
         if num_flops is not None and logger_config.log_throughput:
             log_string += f" throughput per GPU (TFLOP/s/GPU): {per_gpu_tf:.1f} |"
+        tokens_per_sec_per_gpu = throughput_report.get("throughput/device/tokens_per_sec")
+        if isinstance(tokens_per_sec_per_gpu, (int, float)):
+            log_string += f" tokens/s/GPU: {tokens_per_sec_per_gpu:,.1f} |"
 
         if energy_monitor is not None:
             energy = (energy_monitor.lap() / total_iterations) / get_world_size_safe()
@@ -1244,7 +1292,8 @@ def training_log(
         total_loss_dict[advanced_iters_key] = 0
         total_loss_dict[skipped_iters_key] = 0
         total_loss_dict[nan_iters_key] = 0
-        print_rank_last(log_string)
+        console_color = getattr(logger_config, "console_color", "never")
+        print_rank_last(_colorize_training_log(log_string, console_color))
         if report_memory_flag:
             # Report memory after optimizer state has been initialized.
             if torch.distributed.get_rank() == 0:

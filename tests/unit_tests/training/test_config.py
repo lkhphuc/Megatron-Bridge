@@ -4985,6 +4985,7 @@ class TestLoggerConfigFinalize:
     def test_finalize_no_mlflow_settings(self):
         """Test finalize succeeds when no MLFlow settings are configured."""
         config = LoggerConfig()
+        assert config.console_color == "never"
         # Should not raise
         config.finalize()
 
