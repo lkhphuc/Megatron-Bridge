@@ -48,6 +48,83 @@ def _is_gated_delta_net_variant(experimental_attention_variant: str | None) -> b
     return experimental_attention_variant in {"gated_delta_net", "gdn"}
 
 
+def _dsv4_attention_flop_terms(model: Any, *, n_window: int, n_csa: int, n_hca: int) -> tuple[float, float]:
+    """Return training FLOPs per token and per squared sequence length for DSv4 attention.
+
+    GEMMs use two FLOPs per multiply-add. Main-model operations use the usual
+    forward plus backward 3x estimate. The detached indexer has its own
+    forward/backward schedule, determined by its auxiliary loss. This is a
+    nominal model-work count: backend-specific score recomputation, masked
+    lanes, and top-k selection kernels are outside the estimate.
+    """
+    q_lora_rank = getattr(model, "q_lora_rank", None)
+    if q_lora_rank is None:
+        raise ValueError("q_lora_rank must be set for dsv4_hybrid FLOPs calculation")
+    hidden = model.hidden_size
+    heads = model.num_attention_heads
+    value_dim = getattr(model, "v_head_dim", 64)
+    window = getattr(model, "csa_window_size", 128)
+    num_attn = n_window + n_csa + n_hca
+
+    q_term = q_lora_rank * (
+        hidden + heads * (getattr(model, "qk_head_dim", 64) + getattr(model, "qk_pos_emb_head_dim", 0)) + 1
+    )
+    kv_term = hidden * value_dim + value_dim
+    o_rank = getattr(model, "o_lora_rank", 0)
+    o_term = heads * value_dim * o_rank + getattr(model, "o_groups", 1) * o_rank * hidden
+    token_term = 6 * num_attn * (q_term + kv_term + o_term)
+
+    # Window QK and AV, plus two main-compressor projections on compressed layers.
+    token_term += 6 * (
+        num_attn * heads * window * value_dim * 2
+        + n_csa * hidden * (2 * value_dim) * 2
+        + n_hca * hidden * value_dim * 2
+    )
+    squared_term = 6 * n_hca * heads * value_dim / 128
+
+    if n_csa:
+        index_heads = getattr(model, "dsa_indexer_n_heads", None)
+        index_dim = getattr(model, "dsa_indexer_head_dim", None)
+        topk = getattr(model, "dsa_indexer_topk", None)
+        for name, value in (
+            ("dsa_indexer_n_heads", index_heads),
+            ("dsa_indexer_head_dim", index_dim),
+            ("dsa_indexer_topk", topk),
+        ):
+            if value is None or value <= 0:
+                raise ValueError(f"{name} must be positive for dsv4_hybrid ratio==4 layers")
+        seq_length = model.seq_length
+        effective_topk = min(topk, seq_length // 4)
+        average_topk = effective_topk * (1 - effective_topk * 4 / (2 * seq_length))
+        token_term += 6 * n_csa * heads * average_topk * value_dim * 2
+
+        # The indexer reads detached x/qr. Its projections are forward-only
+        # without the KL loss, and forward plus weight gradient with it.
+        trains_indexer = (getattr(model, "dsa_indexer_loss_coeff", 0.0) or 0.0) > 0
+        projection = hidden * (2 * index_dim) * 2 + q_lora_rank * index_heads * index_dim + hidden * index_heads
+        token_term += (4 if trains_indexer else 2) * n_csa * projection
+
+        # The dense selection matmul scores the full L by L/4 rectangle before
+        # its causal mask. This follows MCore's /4 term, rather than halving
+        # work based on the number of valid causal pairs.
+        # The sparse KL backward revisits selected keys; dense KL revisits all.
+        score_dim = index_heads * (index_dim + 1)
+        squared_term += 2 * n_csa * score_dim / 4
+        if trains_indexer:
+            sparse_loss = getattr(model, "dsa_indexer_use_sparse_loss", False)
+            if sparse_loss:
+                token_term += 4 * n_csa * average_topk * score_dim
+            else:
+                squared_term += 4 * n_csa * score_dim / 4
+            # The KL teacher uses detached main-attention Q/K: forward only.
+            if sparse_loss:
+                token_term += 2 * n_csa * average_topk * heads * value_dim
+            else:
+                squared_term += 2 * n_csa * heads * value_dim / 4
+
+    return token_term, squared_term
+
+
 @dataclass(frozen=True)
 class GlobalFlopsRuntimeStats:
     """Data-parallel-global FLOPS statistics collected during one training step.
@@ -727,8 +804,14 @@ def num_floating_point_operations(
         hybrid_pattern = getattr(cfg.model, "hybrid_layer_pattern", None)
         if hybrid_pattern:
             layer_counts = get_hybrid_layer_counts(hybrid_pattern)
+            # DSv4 / MLA HybridModel patterns use W/C/H/D/+ (not only "*").
+            # Counting only Symbols.ATTENTION ("*") zeroes attention FLOPs for
+            # Falcon DSv4 recipes and collapses reported TFLOPs to MLP/MoE-only.
+            num_attn_layers = (
+                sum(layer_counts[symbol] for symbol in Symbols.MLA_ATTENTION) + layer_counts[Symbols.ATTENTION]
+            )
             return (
-                layer_counts[Symbols.ATTENTION],
+                num_attn_layers,
                 layer_counts[Symbols.MAMBA],
                 layer_counts[Symbols.MLP],
                 layer_counts[Symbols.MOE],
@@ -1113,32 +1196,6 @@ def num_floating_point_operations(
             https://arxiv.org/abs/2205.05198
             """
             if experimental_attention_variant == "dsv4_hybrid":
-                # DeepSeek-V4 hybrid MLA uses sparse attention instead of the full
-                # core-attention terms used by DeepSeek-V2/V3 MLA. Projection costs
-                # are accounted here; sparse attention, compressor, and indexer
-                # costs are added below.
-                q_lora_rank = getattr(cfg.model, "q_lora_rank", None)
-                if q_lora_rank is None:
-                    raise ValueError("q_lora_rank must be set for dsv4_hybrid FLOPs calculation")
-
-                qk_head_dim = getattr(cfg.model, "qk_head_dim", 64)
-                qk_pos_emb_head_dim = getattr(cfg.model, "qk_pos_emb_head_dim", 0)
-                v_head_dim = getattr(cfg.model, "v_head_dim", 64)
-                o_lora_rank = getattr(cfg.model, "o_lora_rank", 0)
-                o_groups = getattr(cfg.model, "o_groups", 1)
-
-                q_term = q_lora_rank * (
-                    cfg.model.hidden_size
-                    + cfg.model.num_attention_heads * (qk_head_dim + qk_pos_emb_head_dim)
-                    + 1  # q norm
-                )
-                kv_term = cfg.model.hidden_size * v_head_dim + v_head_dim  # kv projection + kv norm
-                o_term = (
-                    cfg.model.num_attention_heads * v_head_dim * o_lora_rank
-                    + o_groups * o_lora_rank * cfg.model.hidden_size
-                )
-                self_attn_term = 3 * 2 * num_layers * (q_term + kv_term + o_term)
-
                 compress_ratios = getattr(cfg.model, "csa_compress_ratios", None)
                 if compress_ratios is None:
                     raise ValueError("csa_compress_ratios must be set for dsv4_hybrid FLOPs calculation")
@@ -1159,53 +1216,12 @@ def num_floating_point_operations(
                         f"{unsupported_compress_ratios}. Only 0, 4, and 128 are supported."
                     )
 
-                n_layers_r0 = sum(1 for ratio in compress_ratios if ratio == 0)
-                n_layers_r4 = sum(1 for ratio in compress_ratios if ratio == 4)
-                n_layers_r128 = sum(1 for ratio in compress_ratios if ratio == 128)
-                window = getattr(cfg.model, "csa_window_size", 128)
-
-                sparse_attn_r0 = n_layers_r0 * cfg.model.num_attention_heads * window * v_head_dim * 2
-                # Window work is token-linear; compressed-KV attention scales with sum_i(sequence_length_i^2).
-                sparse_attn_r128 = n_layers_r128 * cfg.model.num_attention_heads * window * v_head_dim * 2
-                sparse_attn_r128_core = n_layers_r128 * cfg.model.num_attention_heads * v_head_dim / 128
-
-                main_compressor_term = (
-                    n_layers_r4 * cfg.model.hidden_size * (2 * v_head_dim) * 2
-                    + n_layers_r128 * cfg.model.hidden_size * v_head_dim * 2
+                self_attn_term, dsv4_hybrid_core_attn_term = _dsv4_attention_flop_terms(
+                    cfg.model,
+                    n_window=compress_ratios.count(0),
+                    n_csa=compress_ratios.count(4),
+                    n_hca=compress_ratios.count(128),
                 )
-
-                if n_layers_r4 > 0:
-                    idx_n_heads = getattr(cfg.model, "dsa_indexer_n_heads", None)
-                    idx_head_dim = getattr(cfg.model, "dsa_indexer_head_dim", None)
-                    idx_topk = getattr(cfg.model, "dsa_indexer_topk", None)
-                    if idx_n_heads is None:
-                        raise ValueError("dsa_indexer_n_heads must be set for dsv4_hybrid ratio==4 layers")
-                    if idx_head_dim is None:
-                        raise ValueError("dsa_indexer_head_dim must be set for dsv4_hybrid ratio==4 layers")
-                    if idx_topk is None:
-                        raise ValueError("dsa_indexer_topk must be set for dsv4_hybrid ratio==4 layers")
-
-                    # Match MCore's nominal ratio-4 selection estimate, which uses the configured sequence length.
-                    effective_topk_4 = min(idx_topk, cfg.model.seq_length // 4)
-                    avg_comp_4 = effective_topk_4 * (1 - effective_topk_4 * 4 / (2 * cfg.model.seq_length))
-                    sparse_attn_r4 = (
-                        n_layers_r4 * cfg.model.num_attention_heads * (window + avg_comp_4) * v_head_dim * 2
-                    )
-                    indexer_term = (
-                        n_layers_r4 * cfg.model.hidden_size * (2 * idx_head_dim) * 2
-                        + n_layers_r4 * q_lora_rank * idx_n_heads * idx_head_dim
-                        + n_layers_r4 * cfg.model.hidden_size * idx_n_heads
-                    )
-                    # Dense indexer scoring is quadratic and therefore uses the runtime squared-length sum below.
-                    indexer_scoring_core = n_layers_r4 * idx_n_heads * idx_head_dim / 4
-                else:
-                    sparse_attn_r4 = 0
-                    indexer_term = 0
-                    indexer_scoring_core = 0
-
-                sparse_attn_term = sparse_attn_r0 + sparse_attn_r4 + sparse_attn_r128
-                self_attn_term += 3 * 2 * (sparse_attn_term + main_compressor_term + indexer_term)
-                dsv4_hybrid_core_attn_term = 3 * 2 * (sparse_attn_r128_core + indexer_scoring_core)
             elif experimental_attention_variant == "dsa":
                 # DSA replaces dense MLA core attention with top-k attention while retaining a
                 # dense lightning indexer. The attention/indexer geometry follows equations 1-2
@@ -1633,6 +1649,83 @@ def num_floating_point_operations(
     # layer plus GQA, output gates, sliding attention, logits, and vision work.
     if getattr(cfg.model, "hybrid_attention_layers_include_mlp", False):
         return transformer_flops()
+
+    # DeepSeek-V4 HybridModel patterns (W/C/H/-/E) need pattern-aware CSA/DSA
+    # accounting. The generic hybrid_flops() path uses full MHA quadratic terms
+    # which wildly overcount sparse DSv4 attention; the plain transformer_flops()
+    # path treats every hybrid symbol slot as a dense MLP when num_moe_experts is
+    # None (or as dense-MLP+MoE from moe_layer_freq), also wrong for Falcon.
+    if getattr(cfg.model, "experimental_attention_variant", None) == "dsv4_hybrid" and getattr(
+        cfg.model, "hybrid_layer_pattern", None
+    ):
+        hybrid_pattern = cfg.model.hybrid_layer_pattern
+        layer_counts = get_hybrid_layer_counts(hybrid_pattern)
+        supported_symbols = {Symbols.WINDOW, Symbols.CSA, Symbols.HCA, Symbols.MLP, Symbols.MOE}
+        unsupported_symbols = sorted(
+            symbol for symbol, count in layer_counts.items() if count and symbol not in supported_symbols
+        )
+        if unsupported_symbols:
+            raise ValueError(
+                f"dsv4_hybrid FLOPs do not support layer symbols {unsupported_symbols}; "
+                "only W/C/H/-/E are accounted for"
+            )
+        parsed_pattern = parse_hybrid_pattern(hybrid_pattern)
+        configured_mtp = getattr(cfg.model, "mtp_num_layers", None)
+        mtp_num_layers = parsed_pattern.mtp_num_depths
+        if configured_mtp is not None and configured_mtp != mtp_num_layers:
+            raise ValueError(
+                "dsv4_hybrid MTP depth in hybrid_layer_pattern must match mtp_num_layers: "
+                f"pattern={mtp_num_layers}, config={configured_mtp}"
+            )
+        n_window = layer_counts[Symbols.WINDOW]
+        n_csa = layer_counts[Symbols.CSA]
+        n_hca = layer_counts[Symbols.HCA]
+        num_mlp_layers = layer_counts[Symbols.MLP]
+        num_moe_layers = layer_counts[Symbols.MOE]
+
+        self_attn_term, dsv4_hybrid_core_attn_term = _dsv4_attention_flop_terms(
+            cfg.model, n_window=n_window, n_csa=n_csa, n_hca=n_hca
+        )
+
+        ffn_expansion_factor = 3 if cfg.model.gated_linear_unit is True else 2
+        padded_vocab_size = calculate_padded_vocab_size(
+            cfg.model.vocab_size,
+            cfg.model.make_vocab_size_divisible_by,
+            cfg.model.tensor_model_parallel_size,
+            logging_enabled=False,
+        )
+        moe_ffn_hidden_size = (
+            cfg.model.ffn_hidden_size
+            if getattr(cfg.model, "moe_ffn_hidden_size", None) is None
+            else cfg.model.moe_ffn_hidden_size
+        )
+        dense_ffn_hidden_size = 0 if cfg.model.ffn_hidden_size is None else cfg.model.ffn_hidden_size
+        shared_expert_ffn_hidden_size = (
+            0
+            if getattr(cfg.model, "moe_shared_expert_intermediate_size", None) is None
+            else cfg.model.moe_shared_expert_intermediate_size
+        )
+        num_experts_routed_to = getattr(cfg.model, "moe_router_topk", 1)
+        routed_expert_term = moe_ffn_hidden_size * ffn_expansion_factor * num_experts_routed_to
+
+        total_floating_point_operations = seqlen_sum * (
+            self_attn_term
+            + 3
+            * 2
+            * cfg.model.hidden_size
+            * (
+                (dense_ffn_hidden_size * ffn_expansion_factor) * num_mlp_layers
+                + routed_expert_term * num_moe_layers
+                + (shared_expert_ffn_hidden_size * ffn_expansion_factor) * num_moe_layers
+            )
+            # Hybrid MTP layers are already included in the pattern's layer counts.
+            # Each prediction depth additionally owns two norms, an eh projection,
+            # and a logits projection (same nominal convention as MCore).
+            + 6 * mtp_num_layers * (3 * cfg.model.hidden_size + 2 * cfg.model.hidden_size**2)
+            + 3 * 2 * cfg.model.hidden_size * padded_vocab_size * (1 + mtp_num_layers)
+        )
+        total_floating_point_operations += effective_seqlen_squared_sum * dsv4_hybrid_core_attn_term
+        return total_floating_point_operations + _compute_vit_flops()
 
     # Main entrypoint for FLOPs calculation. Mirror MCore's hybrid detection:
     # a physical hybrid pattern is sufficient to select hybrid accounting.

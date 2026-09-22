@@ -24,7 +24,7 @@ from typing import Any, Callable, NamedTuple, Optional
 
 import numpy as np
 import torch
-from megatron.core import tensor_parallel
+from megatron.core import parallel_state, tensor_parallel
 from megatron.core.config import set_experimental_flag
 from megatron.core.distributed import DistributedDataParallel, DistributedDataParallelConfig, finalize_model_grads
 from megatron.core.distributed.fsdp.mcore_fsdp_adapter import (
@@ -417,6 +417,8 @@ def setup(
     start_memory_history_recording(cfg.profiling)
 
     model = _build_distributed_model(cfg, pg_collection)
+    if not cfg.dist.use_megatron_fsdp and not cfg.dist.use_torch_fsdp2:
+        _log_exact_parameter_counts(model, cfg.model)
 
     cfg.model.timers = timers
     cfg.optimizer.timers = timers
@@ -622,6 +624,58 @@ def _build_distributed_model(cfg: ConfigContainer, pg_collection: ProcessGroupCo
         )
     classify_gtp_remat_chains(model, model_config)
     return model
+
+
+def _log_exact_parameter_counts(model: list[MegatronModule], model_config: object) -> None:
+    """Log unique global dense and routed-expert parameters after model construction.
+
+    Tensor and pipeline shards contribute their local elements. Dense parameters
+    contribute from one DP/CP replica, while expert parameters contribute from
+    one expert-DP/CP replica. MCore marks routed expert parameters with
+    ``allreduce=False``; shared experts remain in the dense bucket.
+    """
+    dense = 0
+    routed_experts = 0
+    seen: set[int] = set()
+    for chunk in model:
+        for param in chunk.parameters():
+            if id(param) in seen:
+                continue
+            seen.add(id(param))
+            if getattr(param, "allreduce", True):
+                dense += param.numel()
+            else:
+                routed_experts += param.numel()
+
+    if parallel_state.get_data_parallel_rank(with_context_parallel=True) != 0:
+        dense = 0
+    if routed_experts and (
+        parallel_state.get_expert_data_parallel_rank() != 0 or parallel_state.get_context_parallel_rank() != 0
+    ):
+        routed_experts = 0
+
+    use_cuda = torch.distributed.is_initialized() and torch.distributed.get_backend() == "nccl"
+    device = torch.device("cuda", torch.cuda.current_device()) if use_cuda else torch.device("cpu")
+    counts = torch.tensor([dense, routed_experts], dtype=torch.int64, device=device)
+    if torch.distributed.is_initialized():
+        torch.distributed.all_reduce(counts)
+    dense, routed_experts = counts.tolist()
+    print_rank_0(f"Exact dense and shared parameter count: {dense:,}")
+    print_rank_0(f"Exact routed expert parameter count: {routed_experts:,}")
+    print_rank_0(f"Exact total parameter count: {dense + routed_experts:,}")
+    num_experts = getattr(model_config, "num_moe_experts", None)
+    topk = getattr(model_config, "moe_router_topk", None)
+    if (
+        routed_experts
+        and isinstance(num_experts, int)
+        and isinstance(topk, int)
+        and num_experts > 0
+        and 0 < topk <= num_experts
+        and routed_experts % num_experts == 0
+    ):
+        active_experts = routed_experts // num_experts * topk
+        print_rank_0(f"Active routed expert parameters per token: {active_experts:,}")
+        print_rank_0(f"Active dense/shared plus routed expert parameters per token: {dense + active_experts:,}")
 
 
 def _update_model_config_funcs(

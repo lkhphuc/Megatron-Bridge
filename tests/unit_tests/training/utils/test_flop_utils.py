@@ -1042,6 +1042,35 @@ assert flop_utils._is_gated_delta_net_variant("gdn") is True
 class TestDeepSeekV4HybridFlops:
     """Tests for DeepSeek-V4 hybrid attention FLOPs in the transformer path."""
 
+    def test_dsv4_indexer_loss_modes_change_backward_work(self):
+        """Detached indexer projections and score gradients follow the KL mode."""
+        base = MockModelConfig(
+            num_layers=1,
+            hidden_size=128,
+            seq_length=512,
+            num_attention_heads=4,
+            q_lora_rank=16,
+            qk_head_dim=24,
+            qk_pos_emb_head_dim=8,
+            v_head_dim=32,
+            o_lora_rank=16,
+            o_groups=2,
+            dsa_indexer_n_heads=2,
+            dsa_indexer_head_dim=8,
+            dsa_indexer_topk=32,
+        )
+        no_loss = flop_utils._dsv4_attention_flop_terms(base, n_window=0, n_csa=1, n_hca=0)
+        base.dsa_indexer_loss_coeff = 0.01
+        base.dsa_indexer_use_sparse_loss = True
+        sparse_loss = flop_utils._dsv4_attention_flop_terms(base, n_window=0, n_csa=1, n_hca=0)
+        base.dsa_indexer_use_sparse_loss = False
+        dense_loss = flop_utils._dsv4_attention_flop_terms(base, n_window=0, n_csa=1, n_hca=0)
+
+        assert sparse_loss[0] > no_loss[0]
+        assert sparse_loss[1] == no_loss[1]
+        assert dense_loss[1] > sparse_loss[1]
+        assert dense_loss[0] > no_loss[0]
+
     def test_dsv4_hybrid_exact_flops(self):
         """DSv4 hybrid FLOPs include sparse attention, compressor, and indexer terms."""
         batch_size = 1
@@ -1097,14 +1126,14 @@ class TestDeepSeekV4HybridFlops:
         avg_comp_4 = effective_topk * (1 - effective_topk * 4 / (2 * seq_len))
         sparse_attn_r4 = num_heads * (window + avg_comp_4) * v_head_dim * 2
         main_compressor_term = hidden_size * (2 * v_head_dim) * 2 + hidden_size * v_head_dim * 2
-        indexer_term = (
-            hidden_size * (2 * idx_head_dim) * 2
-            + q_lora_rank * idx_n_heads * idx_head_dim
-            + hidden_size * idx_n_heads
-            + idx_n_heads * idx_head_dim * (seq_len // 4)
+        indexer_projection = (
+            hidden_size * (2 * idx_head_dim) * 2 + q_lora_rank * idx_n_heads * idx_head_dim + hidden_size * idx_n_heads
         )
+        indexer_forward_score = 2 * idx_n_heads * (idx_head_dim + 1) * seq_len / 4
         dsv4_extra_term = (
-            3 * 2 * (sparse_attn_r0 + sparse_attn_r4 + sparse_attn_r128 + main_compressor_term + indexer_term)
+            6 * (sparse_attn_r0 + sparse_attn_r4 + sparse_attn_r128 + main_compressor_term)
+            + 2 * indexer_projection
+            + indexer_forward_score
         )
         self_attention_term = projection_term + dsv4_extra_term
 
@@ -1116,7 +1145,187 @@ class TestDeepSeekV4HybridFlops:
 
         assert actual_flops == expected_flops
 
-    def test_dsv4_hybrid_packed_flops_match_mcore_split(self):
+    def test_dsv4_hybrid_pattern_counts_wch_not_star_only(self):
+        """Falcon-style W/C/H patterns must count CSA/DSA FLOPs (not MLP-only)."""
+        # One CSA + one dense MLP: "C-" — attention FLOPs must be non-zero.
+        model_cfg = MockModelConfig(
+            num_layers=2,
+            hidden_size=128,
+            seq_length=512,
+            ffn_hidden_size=256,
+            num_attention_heads=4,
+            vocab_size=1024,
+            multi_latent_attention=True,
+            experimental_attention_variant="dsv4_hybrid",
+            hybrid_layer_pattern="C-",
+            q_lora_rank=16,
+            qk_head_dim=24,
+            qk_pos_emb_head_dim=8,
+            v_head_dim=32,
+            o_lora_rank=16,
+            o_groups=2,
+            csa_compress_ratios=[4, 0],
+            csa_window_size=64,
+            dsa_indexer_n_heads=2,
+            dsa_indexer_head_dim=8,
+            dsa_indexer_topk=32,
+            gated_linear_unit=False,
+            num_moe_experts=None,
+        )
+        with_attn = num_floating_point_operations(MockConfigContainer(model=model_cfg), batch_size=1)
+
+        # MLP-only pattern should be strictly smaller.
+        mlp_only = MockModelConfig(
+            num_layers=1,
+            hidden_size=128,
+            seq_length=512,
+            ffn_hidden_size=256,
+            num_attention_heads=4,
+            vocab_size=1024,
+            multi_latent_attention=True,
+            experimental_attention_variant="dsv4_hybrid",
+            hybrid_layer_pattern="-",
+            q_lora_rank=16,
+            qk_head_dim=24,
+            qk_pos_emb_head_dim=8,
+            v_head_dim=32,
+            o_lora_rank=16,
+            o_groups=2,
+            csa_compress_ratios=[0],
+            csa_window_size=64,
+            dsa_indexer_n_heads=2,
+            dsa_indexer_head_dim=8,
+            dsa_indexer_topk=32,
+            gated_linear_unit=False,
+            num_moe_experts=None,
+        )
+        without_attn = num_floating_point_operations(MockConfigContainer(model=mlp_only), batch_size=1)
+        assert with_attn > without_attn
+
+    @pytest.mark.parametrize("symbol", ["D", "+", "*", "M", "G", "K"])
+    def test_dsv4_hybrid_rejects_unaccounted_layer_symbols(self, symbol):
+        """A valid hybrid symbol must not silently contribute zero FLOPs."""
+        model_cfg = MockModelConfig(
+            num_layers=1,
+            experimental_attention_variant="dsv4_hybrid",
+            hybrid_layer_pattern=symbol,
+        )
+        with pytest.raises(ValueError, match="do not support layer symbols"):
+            num_floating_point_operations(MockConfigContainer(model=model_cfg), batch_size=1)
+
+    @pytest.mark.parametrize("pattern,mtp_num_layers", [("C-", 1), ("C-/C-", 0)])
+    def test_dsv4_hybrid_rejects_inconsistent_mtp_depth(self, pattern, mtp_num_layers):
+        """The configured MTP depth must agree with the physical pattern."""
+        model_cfg = MockModelConfig(
+            num_layers=2,
+            experimental_attention_variant="dsv4_hybrid",
+            hybrid_layer_pattern=pattern,
+            mtp_num_layers=mtp_num_layers,
+        )
+        with pytest.raises(ValueError, match="MTP depth in hybrid_layer_pattern must match"):
+            num_floating_point_operations(MockConfigContainer(model=model_cfg), batch_size=1)
+
+    def test_dsv4_hybrid_mtp_adds_nested_layers_and_head(self):
+        """An MTP depth adds pattern layers, its input projection, and logits."""
+        base = dict(
+            num_layers=2,
+            hidden_size=128,
+            seq_length=256,
+            ffn_hidden_size=256,
+            num_attention_heads=4,
+            vocab_size=1024,
+            multi_latent_attention=True,
+            experimental_attention_variant="dsv4_hybrid",
+            q_lora_rank=16,
+            qk_head_dim=24,
+            qk_pos_emb_head_dim=8,
+            v_head_dim=32,
+            o_lora_rank=16,
+            o_groups=2,
+            csa_window_size=64,
+            dsa_indexer_n_heads=2,
+            dsa_indexer_head_dim=8,
+            dsa_indexer_topk=16,
+            gated_linear_unit=False,
+        )
+        without = num_floating_point_operations(
+            MockConfigContainer(model=MockModelConfig(**base, hybrid_layer_pattern="W-", mtp_num_layers=0)),
+            batch_size=1,
+        )
+        with_mtp = num_floating_point_operations(
+            MockConfigContainer(model=MockModelConfig(**base, hybrid_layer_pattern="W-/W-", mtp_num_layers=1)),
+            batch_size=1,
+        )
+        nested_attention = 6 * (16 * (128 + 4 * 32 + 1) + 128 * 32 + 32 + 4 * 32 * 16 + 2 * 16 * 128 + 4 * 64 * 32 * 2)
+        nested_mlp = 6 * 128 * (256 * 2)
+        mtp_head = 6 * (3 * 128 + 2 * 128**2 + 128 * 1024)
+        assert with_mtp - without == 256 * (nested_attention + nested_mlp + mtp_head)
+
+    def test_dsv4_standard_and_hybrid_use_same_attention_formula(self):
+        """Equivalent decoder layers agree across the two accounting paths."""
+        base = dict(
+            hidden_size=128,
+            seq_length=256,
+            ffn_hidden_size=256,
+            num_attention_heads=4,
+            vocab_size=1024,
+            multi_latent_attention=True,
+            experimental_attention_variant="dsv4_hybrid",
+            q_lora_rank=16,
+            qk_head_dim=24,
+            qk_pos_emb_head_dim=8,
+            v_head_dim=32,
+            o_lora_rank=16,
+            o_groups=2,
+            csa_window_size=64,
+            dsa_indexer_n_heads=2,
+            dsa_indexer_head_dim=8,
+            dsa_indexer_topk=16,
+            dsa_indexer_loss_coeff=0.01,
+            dsa_indexer_use_sparse_loss=True,
+            gated_linear_unit=False,
+        )
+        standard = MockModelConfig(**base, num_layers=2, csa_compress_ratios=[0, 4])
+        hybrid = MockModelConfig(**base, num_layers=4, hybrid_layer_pattern="W-C-")
+        assert num_floating_point_operations(MockConfigContainer(model=standard), batch_size=1) == (
+            num_floating_point_operations(MockConfigContainer(model=hybrid), batch_size=1)
+        )
+
+    def test_dsv4_hybrid_pure_moe_pattern_allows_no_dense_ffn_size(self):
+        """A pure-MoE pattern must not require the unused dense FFN size."""
+        model_cfg = MockModelConfig(
+            num_layers=2,
+            hidden_size=128,
+            seq_length=512,
+            ffn_hidden_size=None,
+            moe_ffn_hidden_size=64,
+            moe_shared_expert_intermediate_size=64,
+            moe_router_topk=2,
+            num_attention_heads=4,
+            vocab_size=1024,
+            multi_latent_attention=True,
+            experimental_attention_variant="dsv4_hybrid",
+            hybrid_layer_pattern="CE",
+            q_lora_rank=16,
+            qk_head_dim=24,
+            qk_pos_emb_head_dim=8,
+            v_head_dim=32,
+            o_lora_rank=16,
+            o_groups=2,
+            csa_compress_ratios=[4, 0],
+            csa_window_size=64,
+            dsa_indexer_n_heads=2,
+            dsa_indexer_head_dim=8,
+            dsa_indexer_topk=32,
+            gated_linear_unit=False,
+            num_moe_experts=8,
+        )
+
+        flops = num_floating_point_operations(MockConfigContainer(model=model_cfg), batch_size=1)
+
+        assert flops > 0
+
+    def test_dsv4_hybrid_packed_flops_split_linear_and_quadratic_work(self):
         """Packed DSv4 FLOPs split token-linear work from quadratic sparse work."""
         batch_size = 2
         seq_len = 256
@@ -1178,16 +1387,19 @@ class TestDeepSeekV4HybridFlops:
         main_compressor_term = (
             n_layers_r4 * hidden_size * (2 * v_head_dim) * 2 + n_layers_r128 * hidden_size * v_head_dim * 2
         )
-        indexer_token_term = (
+        indexer_projection = (
             n_layers_r4 * hidden_size * (2 * idx_head_dim) * 2
             + n_layers_r4 * q_lora_rank * idx_n_heads * idx_head_dim
             + n_layers_r4 * hidden_size * idx_n_heads
         )
-        self_attn_token_term = projection_term + 3 * 2 * (
-            sparse_attn_r0 + sparse_attn_r4 + sparse_attn_r128_window + main_compressor_term + indexer_token_term
+        self_attn_token_term = (
+            projection_term
+            + 3 * 2 * (sparse_attn_r0 + sparse_attn_r4 + sparse_attn_r128_window + main_compressor_term)
+            + 2 * indexer_projection
         )
         self_attn_core_term = (
-            3 * 2 * (n_layers_r128 * num_heads * v_head_dim / 128 + n_layers_r4 * idx_n_heads * idx_head_dim / 4)
+            3 * 2 * n_layers_r128 * num_heads * v_head_dim / 128
+            + 2 * n_layers_r4 * idx_n_heads * (idx_head_dim + 1) / 4
         )
 
         mlp_term = 3 * 2 * hidden_size * (ffn_hidden_size * 2 * num_layers)
@@ -1330,9 +1542,9 @@ class TestDeepSeekV4HybridFlops:
     @pytest.mark.parametrize(
         ("missing_field", "error_message"),
         [
-            ("dsa_indexer_n_heads", "dsa_indexer_n_heads must be set"),
-            ("dsa_indexer_head_dim", "dsa_indexer_head_dim must be set"),
-            ("dsa_indexer_topk", "dsa_indexer_topk must be set"),
+            ("dsa_indexer_n_heads", "dsa_indexer_n_heads must be positive"),
+            ("dsa_indexer_head_dim", "dsa_indexer_head_dim must be positive"),
+            ("dsa_indexer_topk", "dsa_indexer_topk must be positive"),
         ],
     )
     def test_dsv4_hybrid_ratio4_requires_indexer_config(self, missing_field, error_message):
