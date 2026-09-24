@@ -150,12 +150,13 @@ class TestPackStatsLoggingAndTrainState:
         accumulate_pack_stats(state, tokens, packed_seq_params=packed, vp_stage=0)
         accumulate_pack_skip_stats(
             state,
-            {"overlong": 2, "max_num_images": 1, "unknown_reason": 9},
+            {"overlong": 2, "max_sample_length": 3, "max_num_images": 1, "unknown_reason": 9},
             vp_stage=0,
         )
         stats = resolve_global_pack_stats(state, data_parallel_size=1)
-        assert stats.skipped_samples == 3
+        assert stats.skipped_samples == 6
         assert stats.skipped_by_reason["overlong"] == 2
+        assert stats.skipped_by_reason["max_sample_length"] == 3
         assert stats.skipped_by_reason["max_num_images"] == 1
         assert "unknown_reason" not in stats.skipped_by_reason
 
@@ -163,12 +164,13 @@ class TestPackStatsLoggingAndTrainState:
         fold_pack_stats_into_train_state(train_state, stats)
         accumulate_pack_stats_for_log_interval(state, stats)
         metrics = consume_pack_stats_log_metrics(state, train_state)
-        assert metrics["data/skipped-samples"] == 3.0
+        assert metrics["data/skipped-samples"] == 6.0
         assert metrics["data/skipped-overlong"] == 2.0
+        assert metrics["data/skipped-max_sample_length"] == 3.0
         assert metrics["data/skipped-max_num_images"] == 1.0
         assert metrics["data/skipped-geometry"] == 0.0
-        assert metrics["data/skipped-samples-seen"] == 3.0
-        assert train_state.consumed_pack_skips == 3
+        assert metrics["data/skipped-samples-seen"] == 6.0
+        assert train_state.consumed_pack_skips == 6
 
     def test_interval_accumulate_and_consume(self):
         state = SimpleNamespace()

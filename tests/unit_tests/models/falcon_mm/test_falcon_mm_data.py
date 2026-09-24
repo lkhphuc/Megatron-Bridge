@@ -151,6 +151,17 @@ class TestFalconEnergonDefaults:
         assert config.spatial_merge_size == FALCON_DEFAULT_SPATIAL_MERGE_SIZE == 1
         assert config.temporal_patch_size == FALCON_DEFAULT_TEMPORAL_PATCH_SIZE == 1
         assert config.min_pixels == FALCON_DEFAULT_MIN_PIXELS == 1024
+        assert config.max_sample_length is None
+
+    def test_global_sample_limit_reaches_task_encoder_kwargs(self):
+        config = FalconEnergonTaskEncoderConfig(hf_processor_path="Qwen/Qwen3.5-2B", max_sample_length=8192)
+        kwargs = config._task_encoder_kwargs(
+            MagicMock(seq_length=16384),
+            effective_packing=True,
+            enable_energon_packing=True,
+        )
+        assert kwargs["max_sample_length"] == 8192
+        assert kwargs["max_padding_length"] == 16384
 
     def test_build_requires_energon_packing(self):
         config = FalconEnergonTaskEncoderConfig(hf_processor_path="Qwen/Qwen3.5-2B")
@@ -335,6 +346,58 @@ class TestFalconTaskEncoder:
             encoder.postencode_sample(pending)
         # Deferred drop must not double-count at postencode.
         assert encoder._pack_skip_counts.get("overlong") == 1
+
+    def test_max_sample_length_filters_before_packing_without_shrinking_pack(self):
+        encoder = self._make_encoder(enable_energon_packing=True, max_padding_length=16)
+        subflavors = {"max_sample_length": 8, "max_pixels": 262144}
+        first = encoder.preencode_sample(_document_sample(["word " * 8], key="first", subflavors=subflavors))
+        second = encoder.preencode_sample(_document_sample(["word " * 8], key="second", subflavors=subflavors))
+        rejected = encoder.preencode_sample(_document_sample(["word " * 9], key="rejected", subflavors=subflavors))
+
+        assert first.packing_length == second.packing_length == 8
+        assert first.max_pixels == 262144
+        assert rejected.packing_length == 9
+        assert rejected.drop_reason == "max_sample_length:9>8"
+        assert encoder._pack_skip_counts == {"max_sample_length": 1}
+        packs = encoder.select_samples_to_pack([first, second, rejected])
+        assert any(set(sample.__key__ for sample in pack) == {"first", "second"} for pack in packs)
+        assert [rejected] in packs
+        with pytest.raises(SkipSample):
+            encoder.postencode_sample(rejected)
+        assert encoder._pack_skip_counts == {"max_sample_length": 1}
+
+    def test_max_sample_length_is_per_source_and_must_be_positive(self):
+        encoder = self._make_encoder(enable_energon_packing=True, max_padding_length=16)
+        uncapped = encoder.preencode_sample(_document_sample(["word " * 9]))
+        assert uncapped.drop_reason is None
+        with pytest.raises(ValueError, match="max_sample_length must be greater than 0"):
+            encoder.preencode_sample(_document_sample(["word"], subflavors={"max_sample_length": 0}))
+
+    def test_global_max_sample_length_counts_visual_tokens_and_uses_tighter_source_cap(self):
+        processor = _make_document_processor()
+        encoder = self._make_encoder(
+            processor=processor,
+            enable_energon_packing=True,
+            max_padding_length=64,
+            max_sample_length=10,
+        )
+        document = ImageDocument.from_bytes(_tiff_bytes((128, 128)))
+        image = ImagePageRef(document, 0)
+        visual = encoder.preencode_sample(_document_sample(["short", image], key="visual"))
+        assert visual.packing_length > 10
+        assert visual.drop_reason == f"max_sample_length:{visual.packing_length}>10"
+        processor.assert_not_called()
+
+        tighter = encoder.preencode_sample(
+            _document_sample(["word " * 9], key="tighter", subflavors={"max_sample_length": 8})
+        )
+        assert tighter.drop_reason == "max_sample_length:9>8"
+        looser = encoder.preencode_sample(
+            _document_sample(["word " * 11], key="looser", subflavors={"max_sample_length": 12})
+        )
+        assert looser.drop_reason == "max_sample_length:11>10"
+        with pytest.raises(ValueError, match="max_sample_length must be greater than 0"):
+            self._make_encoder(max_sample_length=0)
 
     def test_encode_batch_attaches_and_clears_skip_stats(self, monkeypatch):
         encoder = self._make_encoder(enable_energon_packing=True, max_padding_length=8)

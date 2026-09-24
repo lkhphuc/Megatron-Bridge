@@ -41,6 +41,7 @@ _CAPTION_IMAGE_MEMBER_KEYS = ("jpg", "jpeg", "png", "webp")
 SUBFLAVOR_MAX_PIXELS = "max_pixels"
 SUBFLAVOR_MIN_PIXELS = "min_pixels"
 SUBFLAVOR_MAX_NUM_IMAGES = "max_num_images"
+SUBFLAVOR_MAX_SAMPLE_LENGTH = "max_sample_length"
 
 # Early-fusion Falcon patchify: ``patch_size=32``, ``merge_size=1``,
 # ``temporal_patch_size=1``. ``min_pixels = patch_size**2 * merge_size``

@@ -210,6 +210,28 @@ splits:
           crude_type: text
 ```
 
+To cap one source, add `max_sample_length` to that blend entry's `subflavors`
+in the mixture YAML, alongside filters such as `max_pixels`:
+
+```yaml
+subflavors:
+  crude_type: mint
+  max_pixels: 1048576
+  max_sample_length: 8192
+```
+
+With `SEQ_LENGTH=16384`, this drops a source
+sample whose aligned text-plus-visual token length exceeds 8192, then packs
+multiple accepted samples into a pack of at most 16384 tokens. This composes
+with `max_pixels` and `max_num_images`; `dataset.seq_length` remains the pack
+capacity. The length includes resized image patch tokens and visual markers.
+For a dataset-wide cap, set `MAX_SAMPLE_LENGTH=8192` with
+`thd_energon.sh`, or pass `dataset.task_encoder.max_sample_length=8192` to a
+recipe. The launcher passes `null` by default, which means no dataset-wide
+cap. The tighter of this cap and a source's `subflavors.max_sample_length`
+applies. Omit both limits to retain the existing behavior. Filtered samples
+are counted under `data/skipped-max_sample_length`.
+
 Train (example — 8×B200 Falcon DSv4 MoE):
 
 ```bash
@@ -252,8 +274,8 @@ checking model fit and the intended data semantics.
 - Row: `input_ids`, `position_ids`, `labels` (shift-left, `-100` on skipped /
 visual ids), `loss_mask`, `visual_values`. No `attention_mask` (THD /
 `cu_seqlens` only).
-- Guards (`SkipSample`): `max_num_images`, `max_visual_tokens`, length >
-`seq_length`, `DecompressionBombError`.
+- Guards (`SkipSample`): `max_num_images`, `max_visual_tokens`,
+`max_sample_length`, length > `seq_length`, `DecompressionBombError`.
 - Recipe dataset defaults (`recipes/falcon_mm/dataset.py`):
 `packing_buffer_size=16` (enables THD packing); Energon-required
 `shuffle_buffer_size=100` and `max_samples_per_sequence=100` (shuffle vs

@@ -63,6 +63,7 @@ from megatron.bridge.models.falcon_mm.data.cookers import (
     FALCON_DEFAULT_TEMPORAL_PATCH_SIZE,
     SUBFLAVOR_MAX_NUM_IMAGES,
     SUBFLAVOR_MAX_PIXELS,
+    SUBFLAVOR_MAX_SAMPLE_LENGTH,
     SUBFLAVOR_MIN_PIXELS,
     FalconDocumentSample,
     FalconPendingSample,
@@ -113,6 +114,7 @@ _SKIP_WARNING_REPORT_EVERY = 1000
 
 # Stable reason keys piggybacked onto successful packs for WandB ``data/skipped-*``.
 SKIP_REASON_OVERLONG = "overlong"
+SKIP_REASON_MAX_SAMPLE_LENGTH = "max_sample_length"
 SKIP_REASON_MAX_NUM_IMAGES = "max_num_images"
 SKIP_REASON_MAX_VISUAL_TOKENS = "max_visual_tokens"
 SKIP_REASON_GEOMETRY = "geometry"
@@ -195,12 +197,32 @@ class FalconEnergonTaskEncoderConfig(QwenVLEnergonTaskEncoderConfig):
     (no ViT merge), ``temporal_patch_size=1``, and
     ``min_pixels = patch_size**2 * merge_size`` (1024). Per-source pixel /
     image-count overrides still belong on Energon ``subflavors``.
+    ``max_sample_length`` caps every source sample independently of pack width;
+    a source subflavor may set a tighter cap.
     """
 
     patch_size: int = FALCON_DEFAULT_PATCH_SIZE
     spatial_merge_size: int = FALCON_DEFAULT_SPATIAL_MERGE_SIZE
     temporal_patch_size: int = FALCON_DEFAULT_TEMPORAL_PATCH_SIZE
     min_pixels: int = FALCON_DEFAULT_MIN_PIXELS
+    max_sample_length: int | None = None
+
+    def _task_encoder_kwargs(
+        self,
+        config: "EnergonDatasetConfig",
+        *,
+        effective_packing: bool,
+        enable_energon_packing: bool,
+    ) -> dict[str, Any]:
+        """Pass the dataset-wide source-sample cap to either Falcon encoder."""
+        return {
+            **super()._task_encoder_kwargs(
+                config,
+                effective_packing=effective_packing,
+                enable_energon_packing=enable_energon_packing,
+            ),
+            "max_sample_length": self.max_sample_length,
+        }
 
     def _apply_patch_geometry(self, vision: Any) -> None:
         """Write Falcon patch / merge knobs onto an HF vision image processor."""
@@ -356,6 +378,20 @@ class FalconTaskEncoder(QwenVLTaskEncoder):
     # postencode path still reaches the Qwen implementation via ``super()``.
     encode_sample = TaskEncoder.encode_sample
 
+    def __init__(
+        self,
+        tokenizer: Any,
+        image_processor: Any,
+        *,
+        max_sample_length: int | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Initialize Falcon packing with an optional dataset-wide sample cap."""
+        super().__init__(tokenizer, image_processor, **kwargs)
+        if max_sample_length is not None and max_sample_length <= 0:
+            raise ValueError("max_sample_length must be greater than 0 when set.")
+        self.max_sample_length = max_sample_length
+
     cookers: Sequence[Cooker[FalconDocumentSample | ChatMLSample]] = [
         Cooker(cook_mint_interleaved, has_subflavors={FALCON_CRUDE_TYPE_KEY: FALCON_CRUDE_TYPE_MINT}),
         Cooker(cook_caption_pair, has_subflavors={FALCON_CRUDE_TYPE_KEY: FALCON_CRUDE_TYPE_CAPTION}),
@@ -412,8 +448,10 @@ class FalconTaskEncoder(QwenVLTaskEncoder):
             return f"max_num_images:{num_images}>{max_num_images}"
         return None
 
-    def _overlong_packing_reason(self, sample_key: Any, packing_length: int) -> str | None:
-        """Return a drop reason when packing length exceeds ``seq_length``.
+    def _overlong_packing_reason(
+        self, sample_key: Any, packing_length: int, max_sample_length: int | None
+    ) -> str | None:
+        """Return a drop reason when packing length exceeds a sample or pack limit.
 
         Prefer a deferred drop over ``SkipSample`` in preencode: Energon buffer
         restore cannot swallow ``SkipSample`` (``Unexpected skip sample``).
@@ -427,7 +465,25 @@ class FalconTaskEncoder(QwenVLTaskEncoder):
                 self.seq_length,
             )
             return f"overlong:{packing_length}>{self.seq_length}"
+        if max_sample_length is not None and packing_length > max_sample_length:
+            self._record_skip(SKIP_REASON_MAX_SAMPLE_LENGTH)
+            self._log_skip_warning(
+                "Defer-dropping sample %s: packing length %d exceeds max_sample_length=%d",
+                sample_key,
+                packing_length,
+                max_sample_length,
+            )
+            return f"max_sample_length:{packing_length}>{max_sample_length}"
         return None
+
+    def _max_sample_length(self, subflavors: dict[str, Any] | None) -> int | None:
+        """Apply the tighter of dataset-wide and per-source aligned-length caps."""
+        limit = resolve_subflavor_int(subflavors, SUBFLAVOR_MAX_SAMPLE_LENGTH, None)
+        if limit is not None and limit <= 0:
+            raise ValueError("max_sample_length must be greater than 0 when set.")
+        if self.max_sample_length is None:
+            return limit
+        return min(self.max_sample_length, limit) if limit is not None else self.max_sample_length
 
     def _marker_token_ids(self) -> VisualMarkerIds | None:
         """Resolve the trunk's visual marker ids (cached, best effort).
@@ -457,8 +513,9 @@ class FalconTaskEncoder(QwenVLTaskEncoder):
     ) -> FalconPendingSample:
         """Compute exact packing length without decoding pixels.
 
-        Subflavor keys ``max_pixels``, ``min_pixels``, and ``max_num_images``
-        override the encoder defaults for that sample.
+        Subflavor keys ``max_pixels``, ``min_pixels``, ``max_num_images``, and
+        ``max_sample_length`` control that sample. The tighter of the
+        dataset-wide and per-source length caps applies.
         """
         if isinstance(sample, FalconPendingSample):
             return sample
@@ -676,6 +733,7 @@ class FalconTaskEncoder(QwenVLTaskEncoder):
         """
         sample_key = sample.__key__
         min_pixels, max_pixels, max_num_images = self._resolved_image_knobs(sample.__subflavors__)
+        max_sample_length = self._max_sample_length(sample.__subflavors__)
         text, images = _assemble_interleaved_document(sample.sequence)
         drop_reason = self._too_many_images_reason(sample_key, len(images), max_num_images)
         if drop_reason is not None:
@@ -722,7 +780,7 @@ class FalconTaskEncoder(QwenVLTaskEncoder):
                 images=images,
             )
 
-        drop_reason = self._overlong_packing_reason(sample_key, packing_length)
+        drop_reason = self._overlong_packing_reason(sample_key, packing_length, max_sample_length)
         return FalconPendingSample.derive_from(
             sample,
             packing_length=packing_length,
@@ -746,6 +804,7 @@ class FalconTaskEncoder(QwenVLTaskEncoder):
         ``SkipSample`` in preencode.
         """
         min_pixels, max_pixels, max_num_images = self._resolved_image_knobs(sample.__subflavors__)
+        max_sample_length = self._max_sample_length(sample.__subflavors__)
         images = list(sample.imgs or [])
         drop_reason = self._too_many_images_reason(sample.__key__, len(images), max_num_images)
         if drop_reason is not None:
@@ -782,7 +841,7 @@ class FalconTaskEncoder(QwenVLTaskEncoder):
                 chatml=sample,
             )
         packing_length = self._align_packing_length(self._text_token_count(conversation) + visual_tokens)
-        drop_reason = self._overlong_packing_reason(sample.__key__, packing_length)
+        drop_reason = self._overlong_packing_reason(sample.__key__, packing_length, max_sample_length)
         return FalconPendingSample.derive_from(
             sample,
             packing_length=packing_length,

@@ -43,6 +43,7 @@ _PACK_ACCUMULATOR_NAMES = (
 # Fixed order for DP all-reduce of Falcon-MM / Energon packing skip reasons.
 PACK_SKIP_REASONS = (
     "overlong",
+    "max_sample_length",
     "max_num_images",
     "max_visual_tokens",
     "geometry",
