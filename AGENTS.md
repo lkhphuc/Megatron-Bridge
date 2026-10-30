@@ -110,3 +110,8 @@ Use `scripts/switch_mcore.sh` to switch versions.
 
 This file is the single source of agent instructions. For Claude Code
 compatibility, create a symlink: `ln -s AGENTS.md CLAUDE.md`
+
+# This local fork dev environment
+- If you are running on my local Macbook and need to access GPUs for testing and development, you can access the devenv via `ssh nebius-moe-gpu00` and source my `~/phuc/.zshrc` for relevant cuda path. The local working folder and the remote should already be in synced via mutagen project in `mutagen.yml`.
+- Remember our falcon-mm early-fusion use energon-native packing THD format (no explicit batch dim B anymore) when comparing recipes.
+- For any changes that touch the behaviour in upstream code, which will likely be fixed in upstream in the future as well, always make an explicit note and/or commits, such that it can be cherry-picked to upstream or dropped later when we merge with upstream.

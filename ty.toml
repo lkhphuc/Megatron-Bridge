@@ -1,0 +1,4 @@
+# Local ty LSP import roots. Not used by CI.
+# scripts/training and scripts/performance add scripts/common to sys.path at runtime.
+[environment]
+extra-paths = ["scripts/common", "3rdparty/Megatron-LM"]

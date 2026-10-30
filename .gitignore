@@ -185,3 +185,8 @@ slurm*.out
 
 # UV package manager
 .uv/
+
+mutagen.yml
+mutagen.yml.lock
+mutagen.yaml
+mutagen.yaml.lock
