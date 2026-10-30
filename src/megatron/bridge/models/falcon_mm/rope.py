@@ -39,6 +39,12 @@ FALCON_DSV4_VISION_START_TOKEN_ID = 128001
 # Video is rejected by FalconDeepseekv4Model; use an id that never appears.
 FALCON_DSV4_UNUSED_VIDEO_TOKEN_ID = -1
 
+# Llama3 reserved special tokens used as Falcon visual markers
+# (``<|reserved_special_token_0/1/2|>`` → pad / vision_start / vision_end).
+FALCON_LLAMA3_IMAGE_TOKEN_ID = 128002
+FALCON_LLAMA3_VISION_START_TOKEN_ID = 128003
+FALCON_LLAMA3_VISION_END_TOKEN_ID = 128004
+
 
 def is_mrope_position_ids(position_ids: torch.Tensor | None) -> bool:
     """Return whether ``position_ids`` is explicit T/H/W metadata ``[3, B, S]``."""

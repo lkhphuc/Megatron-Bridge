@@ -22,6 +22,7 @@ from megatron.bridge.data.builders.energon import EnergonDatasetConfig
 from megatron.bridge.models.falcon_mm.data import (
     FalconDeepseekv4EnergonTaskEncoderConfig,
     FalconEnergonTaskEncoderConfig,
+    FalconLlama3EnergonTaskEncoderConfig,
 )
 
 
@@ -30,7 +31,11 @@ FALCON_ENERGON_MICRO_BATCH_SIZE = 1
 
 
 def make_falcon_energon_dataset(
-    task_encoder: FalconEnergonTaskEncoderConfig | FalconDeepseekv4EnergonTaskEncoderConfig,
+    task_encoder: (
+        FalconEnergonTaskEncoderConfig
+        | FalconDeepseekv4EnergonTaskEncoderConfig
+        | FalconLlama3EnergonTaskEncoderConfig
+    ),
     *,
     seq_length: int,
     packing_buffer_size: int = 16,

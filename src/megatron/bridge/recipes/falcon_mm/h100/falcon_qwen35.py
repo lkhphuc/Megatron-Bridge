@@ -34,10 +34,15 @@ from megatron.bridge.recipes.utils.environment_utils import COMMON_RECIPE_ENV_VA
 from megatron.bridge.recipes.utils.optimizer_utils import distributed_fused_adam_with_cosine_annealing
 from megatron.bridge.training.comm_overlap import CommOverlapConfig
 from megatron.bridge.training.config import ConfigContainer
+from megatron.bridge.training.mixed_precision import bf16_mixed
 
 
 _HF_2B = "Qwen/Qwen3.5-2B"
 _HF_35B_A3B = "Qwen/Qwen3.5-35B-A3B"
+
+# Pretrain LR schedule shared with Qwen3.5-VL 35B-A3B library recipes.
+_FALCON_QWEN35_PRETRAIN_MAX_LR = 3e-4
+_FALCON_QWEN35_PRETRAIN_MIN_LR = 3e-5
 
 __all__ = [
     "falcon_qwen35_2b_sft_1gpu_h100_bf16_config",
@@ -46,6 +51,8 @@ __all__ = [
     "falcon_qwen35_2b_pretrain_8gpu_h100_bf16_config",
     "falcon_qwen35_35b_a3b_sft_8gpu_h100_bf16_config",
     "falcon_qwen35_35b_a3b_sft_16gpu_h100_bf16_config",
+    "falcon_qwen35_35b_a3b_pretrain_8gpu_h100_bf16_config",
+    "falcon_qwen35_35b_a3b_pretrain_16gpu_h100_bf16_config",
 ]
 
 
@@ -157,6 +164,16 @@ def _apply_falcon_energon_sft_runtime(
     }
 
 
+def _enable_gdn_conv_fusion(model) -> None:
+    """Enable GDN pre-gated-delta-rule fusion when Megatron-Core exposes it.
+
+    Same guard as the Qwen3.5-VL recipes: assigning an unknown field would
+    silently create a phantom attribute on older Core builds.
+    """
+    if hasattr(type(model), "gdn_pre_gated_delta_rule_fusion") or hasattr(model, "gdn_pre_gated_delta_rule_fusion"):
+        model.gdn_pre_gated_delta_rule_fusion = True
+
+
 def _apply_falcon_moe_runtime(cfg: ConfigContainer) -> None:
     """MoE dispatcher / EP defaults shared by Falcon-MM MoE recipes."""
     cfg.model.pipeline_dtype = torch.bfloat16
@@ -187,6 +204,59 @@ def _apply_falcon_moe_runtime(cfg: ConfigContainer) -> None:
     cfg.env_vars = {
         **cfg.env_vars,
         "CUDA_DEVICE_MAX_CONNECTIONS": 1,
+    }
+
+
+def _apply_falcon_qwen35_moe_hybridep(cfg: ConfigContainer, *, expert_parallel_size: int) -> None:
+    """Map Qwen3.5-VL 35B-A3B HybridEP knobs onto Falcon-MM Energon packing.
+
+    Upstream references:
+    - library ``qwen35_vl_35b_a3b_pretrain_config`` / H100 execution policy
+    - B200 perf ``qwen35_vl_35b_a3b_pretrain_8gpu_b200_bf16_config``
+
+    CUDA graphs stay off (Energon-native packing). EP A2A overlap stays off
+    (VLM schedule-plan gap, same as Falcon DSv4). Fixed pack width helps
+    HybridEP under variable-shape vision tokens.
+
+    ``moe_permute_fusion_into_hybridep`` stays False (Falcon DSv4 Energon
+    path). Upstream Qwen3.5-VL H100 sets it True, but fused permute+dispatch
+    fails HybridEP ``config.is_valid`` on Falcon THD packs
+    (``AssertionError: The config is not valid.``).
+    """
+    cfg.model.moe_token_dispatcher_type = "flex"
+    cfg.model.moe_flex_dispatcher_backend = "hybridep"
+    cfg.model.moe_hybridep_num_sms = None
+    cfg.model.moe_flex_dispatcher_num_sms = 16
+    cfg.model.moe_hybridep_num_sms_preprocessing = 16
+    cfg.model.moe_permute_fusion = True
+    # Keep unfused permute ↔ HybridEP (see docstring); matches Falcon DSv4.
+    cfg.model.moe_permute_fusion_into_hybridep = False
+    cfg.model.moe_shared_expert_overlap = False
+    cfg.model.moe_router_force_load_balancing = False
+    cfg.model.apply_rope_fusion = False
+    cfg.model.batch_p2p_sync = False
+    if hasattr(cfg.model, "high_priority_a2a_comm_stream"):
+        cfg.model.high_priority_a2a_comm_stream = True
+    if hasattr(cfg.model, "overlap_dispatch_backward_with_experts_wgrad"):
+        # Safe without CUDA graphs / EP overlap; mirrors the H100 execution policy.
+        cfg.model.overlap_dispatch_backward_with_experts_wgrad = True
+
+    cfg.dataset.pad_to_max_length = True
+
+    cfg.env_vars = {
+        **cfg.env_vars,
+        "CUDA_DEVICE_MAX_CONNECTIONS": 32,
+        "NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN": expert_parallel_size,
+        "NUM_OF_TOKENS_PER_CHUNK_COMBINE_API": 64,
+        "NUM_OF_TOKENS_PER_CHUNK_DISPATCH_API": 64,
+        "NUM_OF_TOKENS_PER_CHUNK_PREPROCESSING_API": 64,
+        "NVLINK_DOMAIN_SIZE": 8,
+        "USE_MNNVL": 0,
+        "NVTE_BWD_LAYERNORM_SM_MARGIN": 0,
+        "NVTE_FWD_LAYERNORM_SM_MARGIN": 0,
+        "NVTE_NORM_BWD_USE_CUDNN": 1,
+        "NVTE_NORM_FWD_USE_CUDNN": 1,
+        "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True",
     }
 
 
@@ -364,4 +434,95 @@ def falcon_qwen35_35b_a3b_sft_16gpu_h100_bf16_config() -> ConfigContainer:
     cfg = _falcon_qwen35_35b_a3b_sft_base()
     cfg.model.expert_model_parallel_size = 8
     cfg.train.global_batch_size = 32
+    return cfg
+
+
+def _falcon_qwen35_35b_a3b_pretrain_base() -> ConfigContainer:
+    """From-scratch Falcon-MM 35B-A3B MoE pretrain with Qwen3.5-VL MoE knobs.
+
+    Starts from the Energon SFT runtime (THD packing, MBS=1, MTP off, CUDA
+    graphs off), then remaps convergence / execution settings from the
+    upstream Qwen3.5-VL 35B-A3B pretrain path:
+
+    - LR 3e-4 / 3e-5, warmup 500
+    - HybridEP flex dispatcher (H100/B200 perf + library pretrain)
+    - Precision-aware Adam moments (bf16)
+    - Selective recompute ``core_attn`` / ``gdn_norm_out`` / ``moe_act``
+    - GDN pre-gated-delta-rule fusion when Core exposes it
+    - No pretrained checkpoint (random init + Falcon patch embed)
+    """
+    cfg = _falcon_qwen35_35b_a3b_sft_base()
+    _enable_gdn_conv_fusion(cfg.model)
+
+    # Pretrain schedule (matches qwen35_vl_35b_a3b_pretrain_*).
+    opt_cfg, scheduler_cfg = distributed_fused_adam_with_cosine_annealing(
+        lr_warmup_iters=500,
+        lr_decay_iters=300000,
+        max_lr=_FALCON_QWEN35_PRETRAIN_MAX_LR,
+        min_lr=_FALCON_QWEN35_PRETRAIN_MIN_LR,
+    )
+    cfg.optimizer = opt_cfg
+    cfg.scheduler = scheduler_cfg
+    cfg.optimizer.use_precision_aware_optimizer = True
+    cfg.optimizer.main_grads_dtype = torch.float32
+    cfg.optimizer.main_params_dtype = torch.float32
+    cfg.optimizer.exp_avg_dtype = torch.bfloat16
+    cfg.optimizer.exp_avg_sq_dtype = torch.bfloat16
+    cfg.optimizer.overlap_param_gather_with_optimizer_step = False
+
+    cfg.mixed_precision = bf16_mixed()
+    cfg.mixed_precision.grad_reduce_in_fp32 = False
+    cfg.ddp.grad_reduce_in_fp32 = False
+
+    # Preserve architecture vocabulary (multimodal tokens) for from-scratch runs.
+    cfg.tokenizer.use_tokenizer_vocab_size = False
+    cfg.tokenizer.tokenizer_model = _HF_35B_A3B
+
+    # Activation memory: library pretrain selective set (not full-layer SFT).
+    cfg.model.recompute_granularity = "selective"
+    cfg.model.recompute_method = None
+    cfg.model.recompute_num_layers = None
+    cfg.model.recompute_modules = ["core_attn", "gdn_norm_out", "moe_act"]
+
+    cfg.model.freeze_language_model = False
+    cfg.model.freeze_vision_model = False
+    cfg.model.freeze_vision_projection = False
+    cfg.checkpoint.pretrained_checkpoint = None
+
+    _apply_falcon_qwen35_moe_hybridep(cfg, expert_parallel_size=cfg.model.expert_model_parallel_size)
+    return cfg
+
+
+def falcon_qwen35_35b_a3b_pretrain_8gpu_h100_bf16_config() -> ConfigContainer:
+    """Return a from-scratch pretrain config for Falcon-MM 35B-A3B on 8 H100s.
+
+    Default configuration: 8 GPUs
+    - TP=1, PP=2, EP=4, CP=1
+    - HybridEP (from Qwen3.5-VL MoE pretrain/perf), EP overlap off
+    - Energon-native THD packing, MBS=1, GBS=16
+    - Selective recompute; LR=3e-4
+    - Sequence length: 4096
+
+    Launch with ``checkpoint.pretrained_checkpoint=null`` (already the default)
+    and ``--mode pretrain --step_func vlm_step``.
+    """
+    return _falcon_qwen35_35b_a3b_pretrain_base()
+
+
+def falcon_qwen35_35b_a3b_pretrain_16gpu_h100_bf16_config() -> ConfigContainer:
+    """Return a from-scratch pretrain config for Falcon-MM 35B-A3B on 16 H100s.
+
+    Execution resize toward ``qwen35_vl_35b_a3b_pretrain_config`` /
+    ``qwen35_vl_35b_a3b_pretrain_16gpu_h100_bf16_config``:
+
+    Default configuration: 16 GPUs
+    - TP=1, PP=2, EP=8, CP=1
+    - HybridEP, selective recompute, GBS=32 (raise toward 512 for throughput)
+    - CUDA graphs stay off (Energon packing)
+    - Sequence length: 4096
+    """
+    cfg = _falcon_qwen35_35b_a3b_pretrain_base()
+    cfg.model.expert_model_parallel_size = 8
+    cfg.train.global_batch_size = 32
+    _apply_falcon_qwen35_moe_hybridep(cfg, expert_parallel_size=8)
     return cfg

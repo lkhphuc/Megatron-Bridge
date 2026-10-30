@@ -63,6 +63,30 @@ def _minimal_qwen35_vl_moe_provider() -> Qwen35VLMoEModelProvider:
 
 
 class TestFalconQwen35ModelProvider:
+    def test_direct_provider_keeps_custom_hmlp_geometry(self):
+        provider = FalconQwen35ModelProvider(
+            num_layers=2,
+            hidden_size=64,
+            ffn_hidden_size=128,
+            num_attention_heads=4,
+            kv_channels=32,
+            seq_length=64,
+            vocab_size=128,
+            linear_num_key_heads=2,
+            linear_num_value_heads=2,
+            linear_key_head_dim=16,
+            linear_value_head_dim=16,
+            patch_size=16,
+            patch_embed_num_layers=2,
+            patch_embed_hidden_size=11,
+        )
+        assert provider.patch_size == provider.vision_config.patch_size == 16
+        assert provider.vision_config.hmlp_num_layers == 2
+        assert provider.vision_config.hmlp_intermediate_size == 11
+        assert provider.vision_config.out_hidden_size == provider.hidden_size
+        assert provider.spatial_merge_size == provider.vision_config.spatial_merge_size == 1
+        assert provider.temporal_patch_size == provider.vision_config.temporal_patch_size == 1
+
     def test_model_class_is_falcon(self):
         provider = _minimal_qwen35_vl_provider()
         assert provider.MODEL_CLASS is None  # base resolves to Qwen3VLModel in provide()
@@ -85,17 +109,24 @@ class TestFalconQwen35ModelProvider:
             "linear_attention_freq",
             "mrope_section",
             "image_token_id",
-            "spatial_merge_size",
-            "patch_size",
         ):
             assert getattr(falcon, field_name) == getattr(source, field_name), field_name
-        # Falcon default is 1 (no single-image temporal duplication); still overrideable.
+        # Falcon early-fusion geometry (not HF ViT 16/2/2).
+        assert source.patch_size == 16
+        assert source.spatial_merge_size == 2
         assert source.temporal_patch_size == 2
+        assert falcon.patch_size == 32
+        assert falcon.spatial_merge_size == 1
         assert falcon.temporal_patch_size == 1
+        assert falcon.patch_embed_num_layers == 3
+        assert falcon.vision_config.hmlp_num_layers == 3
         assert falcon.vision_config is source.vision_config
+        assert falcon.vision_config.patch_size == falcon.patch_size
+        assert falcon.vision_config.spatial_merge_size == falcon.spatial_merge_size
         assert falcon.vision_config.temporal_patch_size == falcon.temporal_patch_size
-        # GDN hybrid defaults flow through unchanged.
-        assert falcon.experimental_attention_variant == "gated_delta_net"
+        assert falcon.vision_config.out_hidden_size == falcon.hidden_size
+        # GDN hybrid defaults flow through unchanged (alias may be "gdn").
+        assert falcon.experimental_attention_variant == source.experimental_attention_variant
         assert falcon.linear_attention_freq == 4
 
     def test_falcon_qwen35_provider_from_qwen35_vl_moe_returns_moe_falcon(self):

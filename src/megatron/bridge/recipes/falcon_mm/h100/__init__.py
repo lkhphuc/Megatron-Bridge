@@ -27,4 +27,6 @@ __all__ = [
     "falcon_qwen35_2b_pretrain_8gpu_h100_bf16_config",
     "falcon_qwen35_35b_a3b_sft_8gpu_h100_bf16_config",
     "falcon_qwen35_35b_a3b_sft_16gpu_h100_bf16_config",
+    "falcon_qwen35_35b_a3b_pretrain_8gpu_h100_bf16_config",
+    "falcon_qwen35_35b_a3b_pretrain_16gpu_h100_bf16_config",
 ]

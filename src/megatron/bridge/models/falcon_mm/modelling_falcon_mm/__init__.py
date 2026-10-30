@@ -14,8 +14,8 @@
 
 """Encoder-free Falcon multimodal models.
 
-Two trunk variants share the encoder-free patch embed (Conv3d patchify +
-hMLP merger) and the placeholder-span scatter contract:
+Trunk variants share the encoder-free, linear-only hMLP patch embed and the
+placeholder-span scatter contract:
 
 - :class:`FalconQwen35Model` reuses :class:`Qwen3VLModel` wholesale —
   placeholder-span scatter, MRoPE x THD x CP, per-stage packed metadata
@@ -25,6 +25,8 @@ hMLP merger) and the placeholder-span scatter contract:
   wrapper pattern. When ``mrope_section`` is set (default ``[11, 11, 10]``),
   the wrapper builds Qwen-compatible T/H/W position ids for every DSv4
   attention layer.
+- :class:`FalconLlama3Model` composes the patch embed with a dense GQA
+  ``GPTModel`` Llama3 trunk and plain 1D RoPE (no mRoPE).
 """
 
 from megatron.bridge.models.falcon_mm.modelling_falcon_mm.model import (
@@ -34,6 +36,14 @@ from megatron.bridge.models.falcon_mm.modelling_falcon_mm.model import (
 from megatron.bridge.models.falcon_mm.modelling_falcon_mm.model_deepseekv4 import (
     FalconDeepseekv4Model,
 )
+from megatron.bridge.models.falcon_mm.modelling_falcon_mm.model_llama3 import (
+    FalconLlama3Model,
+)
 
 
-__all__ = ["FalconDeepseekv4Model", "FalconPatchEmbedVisionModel", "FalconQwen35Model"]
+__all__ = [
+    "FalconDeepseekv4Model",
+    "FalconLlama3Model",
+    "FalconPatchEmbedVisionModel",
+    "FalconQwen35Model",
+]

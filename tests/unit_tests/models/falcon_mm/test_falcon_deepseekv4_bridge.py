@@ -111,19 +111,15 @@ class TestGlobalMappings:
 
 
 class TestPatchEmbedMappings:
-    """All eight patch-embed / merger mappings must be present."""
+    """All hMLP linear and normalization mappings must be present."""
 
     @pytest.mark.parametrize(
         ("megatron_param", "hf_param"),
         [
-            ("vision_model.patch_embed.proj.weight", "patch_embed.proj.weight"),
-            ("vision_model.patch_embed.proj.bias", "patch_embed.proj.bias"),
-            ("vision_model.merger.patch_norm.weight", "patch_embed.merger.patch_norm.weight"),
-            ("vision_model.merger.patch_norm.bias", "patch_embed.merger.patch_norm.bias"),
-            ("vision_model.merger.linear_fc1.weight", "patch_embed.merger.linear_fc1.weight"),
-            ("vision_model.merger.linear_fc1.bias", "patch_embed.merger.linear_fc1.bias"),
-            ("vision_model.merger.linear_fc2.weight", "patch_embed.merger.linear_fc2.weight"),
-            ("vision_model.merger.linear_fc2.bias", "patch_embed.merger.linear_fc2.bias"),
+            (f"vision_model.stages.{stage}.{module}.{param}", f"patch_embed.stages.{stage}.{module}.{param}")
+            for stage in range(3)
+            for module in range(2)
+            for param in ("weight", "bias")
         ],
     )
     def test_patch_embed_mapping_present(self, bridge_two_layers, megatron_param, hf_param):

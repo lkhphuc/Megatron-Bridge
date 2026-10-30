@@ -24,6 +24,9 @@ from megatron.bridge.models.falcon_mm.falcon_hybrid_layer_specs import (
     falcon_dsv4_stack_spec,
     falcon_hybrid_dsv4_vl_stack_spec,
 )
+from megatron.bridge.models.falcon_mm.falcon_llama3_provider import (
+    FalconLlama3ModelProvider,
+)
 from megatron.bridge.models.falcon_mm.falcon_qwen35_provider import (
     FalconQwen35ModelProvider,
     FalconQwen35MoEModelProvider,
@@ -32,11 +35,13 @@ from megatron.bridge.models.falcon_mm.falcon_qwen35_provider import (
 from megatron.bridge.models.falcon_mm.falcon_vl_router import FalconVLTopKRouter
 from megatron.bridge.models.falcon_mm.modelling_falcon_mm import (
     FalconDeepseekv4Model,
+    FalconLlama3Model,
     FalconPatchEmbedVisionModel,
     FalconQwen35Model,
 )
 from megatron.bridge.models.falcon_mm.rope import (
     FALCON_DSV4_DEFAULT_MROPE_SECTION,
+    FALCON_LLAMA3_IMAGE_TOKEN_ID,
     build_falcon_dsv4_mrope_position_ids,
 )
 
@@ -45,12 +50,15 @@ __all__ = [
     "FalconDeepseekv4Bridge",
     "FalconDeepseekv4Model",
     "FalconDeepseekv4ModelProvider",
+    "FalconLlama3Model",
+    "FalconLlama3ModelProvider",
     "FalconPatchEmbedVisionModel",
     "FalconQwen35Model",
     "FalconQwen35ModelProvider",
     "FalconQwen35MoEModelProvider",
     "FalconVLTopKRouter",
     "FALCON_DSV4_DEFAULT_MROPE_SECTION",
+    "FALCON_LLAMA3_IMAGE_TOKEN_ID",
     "build_falcon_dsv4_mrope_position_ids",
     "falcon_dsv4_stack_spec",
     "falcon_hybrid_dsv4_vl_stack_spec",

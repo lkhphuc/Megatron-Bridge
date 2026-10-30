@@ -21,12 +21,12 @@ Every Falcon-MM trunk consumes the same token-stream layout per image::
 where ``N = prod(image_grid_thw) // spatial_merge_size**2`` merged visual
 tokens. Each marker is a single special token; only ``image_pad`` is
 expanded. The Qwen trunk emits this natively through the HF processor; the
-DeepSeek-V4 trunk maps the markers onto reserved tokenizer placeholders.
+DeepSeek-V4 and Llama3 trunks map the markers onto reserved tokenizer
+placeholders.
 
 This module is the single source of truth for the marker literal used in
 assembled documents and for resolving the three marker token ids per trunk.
-The model-side scatter target is always ``image_pad_id`` (see
-``falcon_deepseekv4_provider.py``).
+The model-side scatter target is always ``image_pad_id``.
 """
 
 from __future__ import annotations
@@ -59,6 +59,12 @@ QWEN_VISION_END_TOKEN = "<|vision_end|>"
 DSV4_IMAGE_PAD_TOKEN = "<｜place▁holder▁no▁0｜>"
 DSV4_VISION_START_TOKEN = "<｜place▁holder▁no▁1｜>"
 DSV4_VISION_END_TOKEN = "<｜place▁holder▁no▁2｜>"
+
+# Llama3 ships unused ``<|reserved_special_token_N|>`` ids (128002+). Falcon-MM
+# assigns the first three as visual markers (pad / start / end).
+LLAMA3_IMAGE_PAD_TOKEN = "<|reserved_special_token_0|>"
+LLAMA3_VISION_START_TOKEN = "<|reserved_special_token_1|>"
+LLAMA3_VISION_END_TOKEN = "<|reserved_special_token_2|>"
 
 
 @dataclass(frozen=True)
@@ -131,4 +137,14 @@ def resolve_dsv4_marker_ids(tokenizer: Any) -> VisualMarkerIds:
         vision_start_token=DSV4_VISION_START_TOKEN,
         image_pad_token=DSV4_IMAGE_PAD_TOKEN,
         vision_end_token=DSV4_VISION_END_TOKEN,
+    )
+
+
+def resolve_llama3_marker_ids(tokenizer: Any) -> VisualMarkerIds:
+    """Resolve marker ids for the Llama3 trunk (reserved special tokens)."""
+    return resolve_marker_ids(
+        tokenizer,
+        vision_start_token=LLAMA3_VISION_START_TOKEN,
+        image_pad_token=LLAMA3_IMAGE_PAD_TOKEN,
+        vision_end_token=LLAMA3_VISION_END_TOKEN,
     )

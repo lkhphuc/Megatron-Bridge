@@ -20,6 +20,18 @@ from megatron.bridge.recipes.falcon_mm.b200.falcon_deepseekv4 import (
     falcon_deepseekv4_35b_a3b_pretrain_8gpu_b200_fp8mx_config,
     falcon_deepseekv4_flash_pretrain_8gpu_b200_bf16_config,
 )
+from megatron.bridge.recipes.falcon_mm.b200.falcon_llama3 import (
+    falcon_llama3_8b_pretrain_8gpu_b200_bf16_config,
+    falcon_llama3_8b_pretrain_8gpu_b200_fp8cs_config,
+    falcon_llama3_8b_pretrain_8gpu_b200_fp8mx_config,
+    falcon_llama3_8b_pretrain_8gpu_b200_nvfp4_config,
+)
+from megatron.bridge.recipes.falcon_mm.b200.falcon_qwen35 import (
+    falcon_qwen35_2b_pretrain_8gpu_b200_bf16_config,
+    falcon_qwen35_2b_sft_8gpu_b200_bf16_config,
+    falcon_qwen35_35b_a3b_pretrain_8gpu_b200_bf16_config,
+    falcon_qwen35_35b_a3b_sft_8gpu_b200_bf16_config,
+)
 
 
 __all__ = [
@@ -29,4 +41,12 @@ __all__ = [
     "falcon_deepseekv4_flash_pretrain_8gpu_b200_bf16_config",
     "falcon_deepseekv4_35b_a3b_pretrain_8gpu_b200_bf16_config",
     "falcon_deepseekv4_35b_a3b_pretrain_8gpu_b200_fp8mx_config",
+    "falcon_llama3_8b_pretrain_8gpu_b200_bf16_config",
+    "falcon_llama3_8b_pretrain_8gpu_b200_fp8cs_config",
+    "falcon_llama3_8b_pretrain_8gpu_b200_fp8mx_config",
+    "falcon_llama3_8b_pretrain_8gpu_b200_nvfp4_config",
+    "falcon_qwen35_2b_sft_8gpu_b200_bf16_config",
+    "falcon_qwen35_2b_pretrain_8gpu_b200_bf16_config",
+    "falcon_qwen35_35b_a3b_sft_8gpu_b200_bf16_config",
+    "falcon_qwen35_35b_a3b_pretrain_8gpu_b200_bf16_config",
 ]

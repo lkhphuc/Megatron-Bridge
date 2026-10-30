@@ -222,7 +222,7 @@ def falcon_deepseekv4_10b_provider() -> FalconDeepseekv4ModelProvider:
 
 
 def falcon_deepseekv4_35b_a3b_provider() -> FalconDeepseekv4ModelProvider:
-    """Build the approximately 35B-total/3B-active Falcon DSv4 MoE provider."""
+    """Build the 35.6B-total/3.6B-active Falcon DSv4 MoE provider."""
     return _falcon_deepseekv4_scale_provider(
         hybrid_layer_pattern=FALCON_DSV4_MOE_35B_A3B_PATTERN,
         hidden_size=2048,
@@ -282,7 +282,6 @@ def apply_falcon_dsv4_energon_runtime(
     # Fused CSA/DSA — unfused path dominated the seq-8k memory peak.
     cfg.model.dsa_kernel_backend = "cudnn"
 
-    # Flash-safe selective recompute (not core_attn; not full-layer).
     cfg.model.recompute_granularity = "selective"
     cfg.model.recompute_method = None
     cfg.model.recompute_num_layers = None
@@ -307,6 +306,7 @@ def apply_falcon_dsv4_energon_runtime(
         lr_decay_iters=lr_decay_iters,
         max_lr=max_lr,
         min_lr=min_lr,
+        adam_eps=1e-20,
     )
     cfg.optimizer = opt_cfg
     cfg.scheduler = scheduler_cfg
@@ -360,6 +360,7 @@ def apply_falcon_dsv4_blackwell_features(cfg: ConfigContainer) -> None:
     ``num_moe_experts`` is set. Leaves EP overlap and CUDA graphs untouched.
     """
     cfg.model.apply_rope_fusion = True
+    cfg.model.apply_dsa_kernel_fusion = True
     if deepseek_v4_supports_blackwell_fused_kernels():
         cfg.model.use_fused_mhc = True
     cfg.model.dsa_kernel_backend = "cudnn"
@@ -382,8 +383,15 @@ def apply_falcon_dsv4_blackwell_features(cfg: ConfigContainer) -> None:
 
 
 def apply_falcon_dsv4_mxfp8(cfg: ConfigContainer) -> None:
-    """Enable MXFP8 while preserving the Falcon DSv4 training objective."""
+    """Enable MXFP8 while preserving the Falcon DSv4 training objective.
+
+    Keep ``fp8_param_gather`` / DDP AG-GR overlap off for Energon + no-CUDA-graph
+    8-GPU runs: upstream Flash enables them with graphs and larger meshes, and
+    they regress Falcon THD packing throughput without that cover.
+    """
     cfg.model.moe_router_padding_for_fp8 = True
+    if hasattr(cfg.model, "moe_router_padding_for_quantization"):
+        cfg.model.moe_router_padding_for_quantization = True
     cfg.model.mtp_eval_in_bf16 = True
     cfg.model.quant_recipe = _deepseek_v4_mxfp8_quant_recipe()
 
@@ -436,7 +444,6 @@ FALCON_DSV4_B200_QWEN30B_MXFP8_ENV_VARS: dict[str, Any] = {
 def apply_falcon_dsv4_qwen30b_style_mxfp8_throughput(
     cfg: ConfigContainer,
     *,
-    seq_length: int = 4096,
     global_batch_size: int = 512,
 ) -> None:
     """Map Qwen3-30B-A3B 8-GPU MXFP8 throughput knobs onto Falcon DSv4 + Energon.
@@ -457,23 +464,11 @@ def apply_falcon_dsv4_qwen30b_style_mxfp8_throughput(
     not a drop-in for mixture training.
     """
     apply_falcon_dsv4_mxfp8(cfg)
-    apply_falcon_dsv4_te_cuda_graphs(cfg)
-
-    cfg.model.seq_length = seq_length
-    if cfg.dataset is not None and hasattr(cfg.dataset, "seq_length"):
-        cfg.dataset.seq_length = seq_length
+    # apply_falcon_dsv4_te_cuda_graphs(cfg)
 
     cfg.train.global_batch_size = global_batch_size
     cfg.train.micro_batch_size = FALCON_ENERGON_MICRO_BATCH_SIZE
     cfg.validation.eval_micro_batch_size = FALCON_ENERGON_MICRO_BATCH_SIZE
-
-    # Match the B200 Qwen3-30B MXFP8 recipe: no activation recompute when fit.
-    # If this OOMs under real vision packs, restore selective
-    # ``["mla_up_proj", "mhc"]`` via CLI.
-    cfg.model.recompute_granularity = None
-    cfg.model.recompute_method = None
-    cfg.model.recompute_num_layers = None
-    cfg.model.recompute_modules = None
 
     cfg.model.moe_router_force_load_balancing = False
     cfg.model.moe_flex_dispatcher_num_sms = 64
@@ -485,8 +480,12 @@ def apply_falcon_dsv4_qwen30b_style_mxfp8_throughput(
         cfg.model.high_priority_a2a_comm_stream = True
     if hasattr(cfg.model, "moe_mlp_glu_interleave_size"):
         cfg.model.moe_mlp_glu_interleave_size = 32
+    # Graph-only padding; leave off while cuda_graph_impl stays none.
     if hasattr(cfg.model, "moe_pad_experts_for_cuda_graph_inference"):
-        cfg.model.moe_pad_experts_for_cuda_graph_inference = True
+        cfg.model.moe_pad_experts_for_cuda_graph_inference = False
+    if hasattr(cfg.model, "use_transformer_engine_op_fuser"):
+        # not supported for HybridModel yet
+        cfg.model.use_transformer_engine_op_fuser = False
 
     # EP overlap stays explicitly false — validate() would clear it anyway.
     cfg.comm_overlap = CommOverlapConfig(

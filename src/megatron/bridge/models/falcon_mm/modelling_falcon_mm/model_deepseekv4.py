@@ -56,9 +56,6 @@ from megatron.bridge.models.falcon_mm.rope import (
     FALCON_DSV4_VISION_START_TOKEN_ID,
     resolve_falcon_dsv4_mrope_position_ids,
 )
-from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.utils import (
-    PatchMergerSubmodules,
-)
 
 
 logger = logging.getLogger(__name__)
@@ -97,8 +94,8 @@ class FalconDeepseekv4Model(MegatronModule):
         patch_embed_config (TransformerConfig): Vision config for the patch
             embed (patch geometry, vision hidden size, ``out_hidden_size``
             equal to the LM hidden size).
-        patch_merger_spec (PatchMergerSubmodules): Spec for the merger norm
-            and linear layers (TP-safe TE modules).
+        patch_embed_num_layers: Number of 2× hMLP merge stages.
+        patch_embed_hidden_size: Width of the non-final hMLP stages.
         image_token_id (int): Placeholder token id whose embedding positions
             receive the patch embeddings (DSv4 reserved token 128000).
         vision_start_token_id (int): Vision-start marker id for mRoPE index
@@ -129,7 +126,8 @@ class FalconDeepseekv4Model(MegatronModule):
         language_vocab_size: int,
         language_max_sequence_length: int,
         patch_embed_config: TransformerConfig,
-        patch_merger_spec: PatchMergerSubmodules,
+        patch_embed_num_layers: int = 3,
+        patch_embed_hidden_size: int | None = None,
         image_token_id: int,
         vision_start_token_id: int = FALCON_DSV4_VISION_START_TOKEN_ID,
         parallel_output: bool = True,
@@ -174,7 +172,8 @@ class FalconDeepseekv4Model(MegatronModule):
         if pre_process:
             self.vision_model = FalconPatchEmbedVisionModel(
                 patch_embed_config,
-                patch_merger_spec,
+                num_layers=patch_embed_num_layers,
+                intermediate_size=patch_embed_hidden_size,
                 pg_collection=self.pg_collection,
             )
             self.vision_model.register_load_state_dict_post_hook(_ignore_transformer_engine_extra_state)
@@ -222,7 +221,7 @@ class FalconDeepseekv4Model(MegatronModule):
     ) -> None:
         """Freeze model modules.
 
-        The patch embed and its merger are a single module, so
+        The hMLP patch embed is a single module, so
         ``freeze_vision_projection`` implies ``freeze_vision_model`` here.
         """
         modules = []

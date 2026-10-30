@@ -15,17 +15,14 @@
 
 # Falcon-MM dev run with Energon-native THD packing.
 # Default data is the pretraining interleaved web-document mixture:
-# MINT-1T-ArXiv image-text + fineweb text-only mixed together.
+# MINT-1T-ArXiv image-text, image-captions + fineweb text-only mixed together.
 # Check the folder's README.md for detail.
 # The FalconTaskEncoder consumes both as raw documents, no chat template.
 #
 # Point ENERGON_PATH at any indexed dataset root / MetadatasetV2 YAML to override.
 # The epochized mixture loops indefinitely (Energon default repeat=True)
 # with exact per-epoch ratios from the YAML repetitions.
-#
-# Throughput sibling of the Qwen3-30B-A3B 8-GPU MXFP8 recipe (GBS=512, seq=4096):
-#   RECIPE=falcon_deepseekv4_moe_35b_a3b_pretrain_8gpu_b200_fp8mx_config \
-#   SEQ_LENGTH=4096 GLOBAL_BATCH_SIZE=512 ./examples/models/falcon_mm/thd_energon.sh
+
 set -euo pipefail
 
 export OMP_NUM_THREADS=8
@@ -38,19 +35,29 @@ export CPATH=/usr/local/cuda/include${CPATH:+:$CPATH}
 export CPATH="${CUDA_HOME}/targets/x86_64-linux/include/cccl${CPATH:+:$CPATH}"
 
 WORKSPACE=${WORKSPACE:-/mnt/checkpoints/phuc}
-ENERGON_PATH=${ENERGON_PATH:-~/phuc/Megatron-Bridge/examples/models/falcon_mm/pretrain_mixture.yaml}
+# Prefer a local Llama3 tokenizer snapshot when present (gated Hub id needs
+# HF auth / warm cache). Override with LLAMA3_TOKENIZER_PATH=... explicitly.
+if [[ -z "${LLAMA3_TOKENIZER_PATH:-}" ]]; then
+  _llama3_tok_candidate="${WORKSPACE}/hf/Meta-Llama-3-8B-tokenizer"
+  if [[ -d "${_llama3_tok_candidate}" ]]; then
+    export LLAMA3_TOKENIZER_PATH="${_llama3_tok_candidate}"
+  fi
+fi
+unset _llama3_tok_candidate
+ENERGON_PATH=${ENERGON_PATH:-"examples/models/falcon_mm/pretrain_mixture.yaml"}
 PRETRAINED_CHECKPOINT=${PRETRAINED_CHECKPOINT:-null}
 LOAD_CHECKPOINT=${LOAD_CHECKPOINT:-null}
 OUTPUT_DIR=${OUTPUT_DIR:-${WORKSPACE}/falcon_mm_35b_pretrain}
-RECIPE=${RECIPE:-falcon_deepseekv4_1b_pretrain_8gpu_b200_bf16_config}
+RECIPE=${RECIPE:-falcon_deepseekv4_35b_a3b_pretrain_8gpu_b200_fp8mx_config}
 NUM_GPUS=${NUM_GPUS:-8}
 LAST_RANK=$((NUM_GPUS-1))
 SEQ_LENGTH=${SEQ_LENGTH:-4096}
-TRAIN_ITERS=${TRAIN_ITERS:-20000}
+TRAIN_ITERS=${TRAIN_ITERS:-100}
 GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-$NUM_GPUS}
 EVAL_ITERS=${EVAL_ITERS:-10}
 EVAL_INTERVAL=${EVAL_INTERVAL:-1000}
 PACKING_BUFFER_SIZE=${PACKING_BUFFER_SIZE:-64}
+MAX_SAMPLE_LENGTH=${MAX_SAMPLE_LENGTH:-null}
 LOGDIR=${LOGDIR:-LOGS/}
 # Set WANDB_API_KEY to log online, or keep the default disabled mode.
 export WANDB_MODE=${WANDB_MODE:-online}
@@ -75,6 +82,7 @@ uv run python -m torch.distributed.run --standalone --nproc_per_node="${NUM_GPUS
   scripts/training/run_recipe.py \
   --recipe "${RECIPE}" \
   --step_func vlm_step \
+  --mode pretrain \
   checkpoint.pretrained_checkpoint="${PRETRAINED_CHECKPOINT}" \
   checkpoint.load="${LOAD_CHECKPOINT}" \
   checkpoint.save="${OUTPUT_DIR}/checkpoints" \
@@ -88,6 +96,7 @@ uv run python -m torch.distributed.run --standalone --nproc_per_node="${NUM_GPUS
   dataset.path="${ENERGON_PATH}" \
   dataset.seq_length="${SEQ_LENGTH}" \
   dataset.packing_buffer_size="${PACKING_BUFFER_SIZE}" \
+  dataset.task_encoder.max_sample_length="${MAX_SAMPLE_LENGTH}" \
   dataset.num_workers=16 \
   dataset.num_val_workers=4 \
   optimizer.lr=1e-4 \
@@ -95,6 +104,7 @@ uv run python -m torch.distributed.run --standalone --nproc_per_node="${NUM_GPUS
   logger.console_color=always \
   logger.log_interval=1 \
   logger.log_device_memory_used=True \
+  logger.log_memory_to_tensorboard=True \
   logger.wandb_project="${WANDB_PROJECT}" \
   logger.timing_log_level=2 \
   logger.log_timers_to_tensorboard=True \

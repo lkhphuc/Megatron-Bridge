@@ -100,6 +100,8 @@ class FalconDeepseekv4Bridge(DeepSeekV4Bridge):
         provider = MegatronModelBridge.provider_bridge(self, hf_pretrained)
         assert isinstance(provider, FalconDeepseekv4ModelProvider)
         hf_config = hf_pretrained.config
+        provider.patch_embed_num_layers = int(getattr(hf_config, "patch_embed_num_layers", 3))
+        provider.patch_embed_hidden_size = getattr(hf_config, "patch_embed_hidden_size", None)
 
         use_blackwell_fused_kernels = deepseek_v4_supports_blackwell_fused_kernels()
         use_dsa_kernel_fusion = use_blackwell_fused_kernels and deepseek_v4_supports_fused_dsa_kernels()
@@ -235,16 +237,16 @@ class FalconDeepseekv4Bridge(DeepSeekV4Bridge):
             ReplicatedMapping("language_model.decoder.hc_head_fn", "hc_head_fn"),
             ReplicatedMapping("language_model.decoder.hc_head_base", "hc_head_base"),
             ReplicatedMapping("language_model.decoder.hc_head_scale", "hc_head_scale"),
-            # ------ Patch embed (absent from text-only CKPTs; stay random) ------
-            _AutoOptional("vision_model.patch_embed.proj.weight", "patch_embed.proj.weight"),
-            _AutoOptional("vision_model.patch_embed.proj.bias", "patch_embed.proj.bias"),
-            _AutoOptional("vision_model.merger.patch_norm.weight", "patch_embed.merger.patch_norm.weight"),
-            _AutoOptional("vision_model.merger.patch_norm.bias", "patch_embed.merger.patch_norm.bias"),
-            _AutoOptional("vision_model.merger.linear_fc1.weight", "patch_embed.merger.linear_fc1.weight"),
-            _AutoOptional("vision_model.merger.linear_fc1.bias", "patch_embed.merger.linear_fc1.bias"),
-            _AutoOptional("vision_model.merger.linear_fc2.weight", "patch_embed.merger.linear_fc2.weight"),
-            _AutoOptional("vision_model.merger.linear_fc2.bias", "patch_embed.merger.linear_fc2.bias"),
         ]
+
+        # Falcon-local hMLP keys are absent from text-only DSv4 checkpoints.
+        # Keep this mapping isolated so it can be cherry-picked or dropped independently upstream.
+        patch_embed_num_layers = int(getattr(hf_config, "patch_embed_num_layers", 3))
+        for stage in range(patch_embed_num_layers):
+            for module in range(2):
+                for param in ("weight", "bias"):
+                    name = f"stages.{stage}.{module}.{param}"
+                    mappings.append(_AutoOptional(f"vision_model.{name}", f"patch_embed.{name}"))
 
         for n in range(num_hidden_layers):
             a = 2 * n  # attention hybrid layer

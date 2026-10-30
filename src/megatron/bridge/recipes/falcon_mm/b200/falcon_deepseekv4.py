@@ -173,9 +173,7 @@ def falcon_deepseekv4_35b_a3b_pretrain_8gpu_b200_bf16_config() -> ConfigContaine
     """Return an 8x B200 from-scratch pretrain config for Falcon DSv4 ~35B-A3B MoE.
 
     Shared Blackwell + HybridEP path. Mesh: TP=1, PP=1, CP=1, EP=8.
-    Defaults stay devenv-sized (GBS=8, selective recompute). For the Qwen3-30B
-    MXFP8 throughput shape on the same Energon mixture, use
-    :func:`falcon_deepseekv4_moe_35b_a3b_pretrain_8gpu_b200_fp8mx_config`.
+    Defaults stay devenv-sized (GBS=8, selective recompute).
     """
     return _scale_b200_base(falcon_deepseekv4_35b_a3b_provider, expert_parallel_size=8)
 

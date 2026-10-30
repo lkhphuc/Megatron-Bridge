@@ -19,7 +19,8 @@ import pytest
 from megatron.bridge.data.builders.energon import EnergonDatasetConfig
 from megatron.bridge.models.falcon_mm.data import FalconEnergonTaskEncoderConfig
 from megatron.bridge.models.qwen_vl.qwen35_vl_provider import Qwen35VLModelProvider, Qwen35VLMoEModelProvider
-from megatron.bridge.recipes.falcon_mm.h100 import falcon_qwen35 as recipe_module
+from megatron.bridge.recipes.falcon_mm.b200 import falcon_qwen35 as b200_recipe_module
+from megatron.bridge.recipes.falcon_mm.h100 import falcon_qwen35 as h100_recipe_module
 
 
 def _minimal_qwen35_vl_provider() -> Qwen35VLModelProvider:
@@ -75,18 +76,24 @@ class _FakeAutoBridge:
 
 @pytest.fixture(autouse=True)
 def _patch_autobridge(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(recipe_module, "AutoBridge", _FakeAutoBridge)
+    monkeypatch.setattr(h100_recipe_module, "AutoBridge", _FakeAutoBridge)
 
 
 @pytest.mark.parametrize(
     "recipe_fn",
     [
-        recipe_module.falcon_qwen35_2b_sft_1gpu_h100_bf16_config,
-        recipe_module.falcon_qwen35_2b_sft_2gpu_h100_bf16_config,
-        recipe_module.falcon_qwen35_2b_pretrain_4gpu_h100_bf16_config,
-        recipe_module.falcon_qwen35_2b_pretrain_8gpu_h100_bf16_config,
-        recipe_module.falcon_qwen35_35b_a3b_sft_8gpu_h100_bf16_config,
-        recipe_module.falcon_qwen35_35b_a3b_sft_16gpu_h100_bf16_config,
+        h100_recipe_module.falcon_qwen35_2b_sft_1gpu_h100_bf16_config,
+        h100_recipe_module.falcon_qwen35_2b_sft_2gpu_h100_bf16_config,
+        h100_recipe_module.falcon_qwen35_2b_pretrain_4gpu_h100_bf16_config,
+        h100_recipe_module.falcon_qwen35_2b_pretrain_8gpu_h100_bf16_config,
+        h100_recipe_module.falcon_qwen35_35b_a3b_sft_8gpu_h100_bf16_config,
+        h100_recipe_module.falcon_qwen35_35b_a3b_sft_16gpu_h100_bf16_config,
+        h100_recipe_module.falcon_qwen35_35b_a3b_pretrain_8gpu_h100_bf16_config,
+        h100_recipe_module.falcon_qwen35_35b_a3b_pretrain_16gpu_h100_bf16_config,
+        b200_recipe_module.falcon_qwen35_2b_sft_8gpu_b200_bf16_config,
+        b200_recipe_module.falcon_qwen35_2b_pretrain_8gpu_b200_bf16_config,
+        b200_recipe_module.falcon_qwen35_35b_a3b_sft_8gpu_b200_bf16_config,
+        b200_recipe_module.falcon_qwen35_35b_a3b_pretrain_8gpu_b200_bf16_config,
     ],
     ids=lambda fn: fn.__name__,
 )
@@ -94,3 +101,40 @@ def test_recipe_uses_falcon_energon_encoder(recipe_fn):
     cfg = recipe_fn()
     assert isinstance(cfg.dataset, EnergonDatasetConfig)
     assert isinstance(cfg.dataset.task_encoder, FalconEnergonTaskEncoderConfig)
+
+
+def test_b200_35b_sft_uses_pp1_ep8_without_full_recompute():
+    cfg = b200_recipe_module.falcon_qwen35_35b_a3b_sft_8gpu_b200_bf16_config()
+    assert cfg.model.pipeline_model_parallel_size == 1
+    assert cfg.model.expert_model_parallel_size == 8
+    assert cfg.model.recompute_granularity is None
+    assert cfg.env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] == 32
+
+
+def test_h100_35b_pretrain_uses_hybridep_and_pretrain_lr():
+    cfg = h100_recipe_module.falcon_qwen35_35b_a3b_pretrain_8gpu_h100_bf16_config()
+    assert cfg.checkpoint.pretrained_checkpoint is None
+    assert cfg.model.moe_token_dispatcher_type == "flex"
+    assert cfg.model.moe_flex_dispatcher_backend == "hybridep"
+    assert cfg.model.moe_permute_fusion_into_hybridep is False
+    assert cfg.model.pipeline_model_parallel_size == 2
+    assert cfg.model.expert_model_parallel_size == 4
+    assert cfg.model.recompute_granularity == "selective"
+    assert cfg.model.recompute_modules == ["core_attn", "gdn_norm_out", "moe_act"]
+    assert cfg.optimizer.lr == pytest.approx(3e-4)
+    assert cfg.optimizer.use_precision_aware_optimizer is True
+    assert cfg.dataset.pad_to_max_length is True
+    assert cfg.env_vars["NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN"] == 4
+
+
+def test_b200_35b_pretrain_uses_pp1_ep8_hybridep_without_recompute():
+    cfg = b200_recipe_module.falcon_qwen35_35b_a3b_pretrain_8gpu_b200_bf16_config()
+    assert cfg.checkpoint.pretrained_checkpoint is None
+    assert cfg.model.pipeline_model_parallel_size == 1
+    assert cfg.model.expert_model_parallel_size == 8
+    assert cfg.model.moe_token_dispatcher_type == "flex"
+    assert cfg.model.moe_flex_dispatcher_backend == "hybridep"
+    assert cfg.model.recompute_granularity is None
+    assert cfg.optimizer.lr == pytest.approx(3e-4)
+    assert cfg.env_vars["CUDA_DEVICE_MAX_CONNECTIONS"] == 32
+    assert cfg.env_vars["NUM_OF_HYBRID_EP_RANKS_PER_NVLINK_DOMAIN"] == 8

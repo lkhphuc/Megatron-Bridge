@@ -18,11 +18,6 @@ from dataclasses import dataclass, field
 from typing import Callable, ClassVar, Optional, Union
 
 import torch
-from megatron.core.extensions.transformer_engine import (
-    TEColumnParallelLinear,
-    TENorm,
-    TERowParallelLinear,
-)
 from megatron.core.models.hybrid.hybrid_model import HybridModel
 from megatron.core.pipeline_parallel.utils import is_pp_first_stage, is_pp_last_stage
 from megatron.core.transformer.spec_utils import ModuleSpec
@@ -42,9 +37,6 @@ from megatron.bridge.models.falcon_mm.rope import (
 from megatron.bridge.models.hybrid.hybrid_provider import HybridModelProvider
 from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.transformer_config import (
     Qwen3VLTransformerConfig,
-)
-from megatron.bridge.models.qwen_vl.modelling_qwen3_vl.utils import (
-    PatchMergerSubmodules,
 )
 from megatron.bridge.utils.vocab_utils import calculate_padded_vocab_size
 
@@ -82,13 +74,13 @@ class FalconDeepseekv4ModelProvider(MLATransformerConfig, HybridModelProvider):
             patch embeddings.
         vision_start_token_id: Vision-start marker id used when building
             Qwen-compatible T/H/W mRoPE indices (DSv4 placeholder 128001).
-        patch_size: Spatial patch edge for the Conv3d patchify.
-        temporal_patch_size: Temporal patch size for Conv3d patchify
-            (Falcon early-fusion default is 1; no frame duplication).
+        patch_size: Spatial patch edge for the hMLP stem.
+        temporal_patch_size: Must be 1; no frame duplication.
         in_channels: Image channels.
-        spatial_merge_size: Spatial merge factor of the patch merger; one
-            visual token covers merge² patches.
-        patch_embed_hidden_size: Width of the patch embed before the merger.
+        spatial_merge_size: Must be 1; hMLP does its own local merging.
+        patch_embed_num_layers: Number of hMLP linear stages.
+        patch_embed_hidden_size: Width of each non-final hMLP stage. ``None``
+            uses one quarter of the LM width.
         moe_vl_routing: When True, hash MoE layers keep ``tid2eid`` for text
             but route ``image_token_id`` pads via ``topk(scores + expert_bias)``
             with one shared bias (no ``bias_vl``). Default False preserves
@@ -114,7 +106,8 @@ class FalconDeepseekv4ModelProvider(MLATransformerConfig, HybridModelProvider):
     temporal_patch_size: int = 1
     in_channels: int = 3
     spatial_merge_size: int = 1
-    patch_embed_hidden_size: int = 1024
+    patch_embed_num_layers: int = 3
+    patch_embed_hidden_size: int | None = None
     moe_vl_routing: bool = False
 
     # DSv4 architecture constants (mirror deepseek_v4_bridge.provider_bridge)
@@ -173,7 +166,9 @@ class FalconDeepseekv4ModelProvider(MLATransformerConfig, HybridModelProvider):
     def _build_patch_embed_config(self) -> Qwen3VLTransformerConfig:
         """Build the vision config consumed by the Falcon patch embed."""
         config = Qwen3VLTransformerConfig(
-            hidden_size=self.patch_embed_hidden_size,
+            hidden_size=self.patch_embed_hidden_size
+            if self.patch_embed_hidden_size is not None
+            else self.hidden_size // 4,
             out_hidden_size=self.hidden_size,
             patch_size=self.patch_size,
             temporal_patch_size=self.temporal_patch_size,
@@ -183,7 +178,7 @@ class FalconDeepseekv4ModelProvider(MLATransformerConfig, HybridModelProvider):
             # but TransformerConfig validation requires a positive head count
             # (kv_channels derivation divides by it) and a positive layer
             # count (init-method scaling divides by it). Both default to 0.
-            num_attention_heads=16,
+            num_attention_heads=1,
             num_layers=1,
         )
         config.tensor_model_parallel_size = self.tensor_model_parallel_size
@@ -297,19 +292,14 @@ class FalconDeepseekv4ModelProvider(MLATransformerConfig, HybridModelProvider):
         pre_process = pre_process if pre_process is not None else is_pp_first_stage(self._pg_collection.pp)
         post_process = post_process if post_process is not None else is_pp_last_stage(self._pg_collection.pp)
 
-        patch_merger_spec = PatchMergerSubmodules(
-            patch_norm=TENorm,
-            linear_fc1=TEColumnParallelLinear,
-            linear_fc2=TERowParallelLinear,
-        )
-
         model = FalconDeepseekv4Model(
             language_transformer_config=self,
             language_transformer_layer_spec=hybrid_stack_spec,
             language_vocab_size=padded_vocab_size,
             language_max_sequence_length=self.seq_length,
             patch_embed_config=self._build_patch_embed_config(),
-            patch_merger_spec=patch_merger_spec,
+            patch_embed_num_layers=self.patch_embed_num_layers,
+            patch_embed_hidden_size=self.patch_embed_hidden_size,
             image_token_id=self.image_token_id,
             vision_start_token_id=self.vision_start_token_id,
             parallel_output=self.parallel_output,

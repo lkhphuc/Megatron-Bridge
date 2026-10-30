@@ -30,6 +30,7 @@ from megatron.bridge.models.falcon_mm.data.cookers import (
 from megatron.bridge.models.falcon_mm.data.energon import (
     FalconDeepseekv4EnergonTaskEncoderConfig,
     FalconEnergonTaskEncoderConfig,
+    FalconLlama3EnergonTaskEncoderConfig,
     FalconTaskEncoder,
 )
 from megatron.bridge.models.falcon_mm.data.visual_markers import (
@@ -53,6 +54,7 @@ __all__ = [
     "FalconDeepseekv4EnergonTaskEncoderConfig",
     "FalconDocumentSample",
     "FalconEnergonTaskEncoderConfig",
+    "FalconLlama3EnergonTaskEncoderConfig",
     "FalconPendingSample",
     "FalconTaskEncoder",
     "VisualMarkerIds",

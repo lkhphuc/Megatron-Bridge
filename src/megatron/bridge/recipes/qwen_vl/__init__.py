@@ -12,6 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# Qwen3-VL B200 models
+from .b200.qwen3_vl import qwen3_vl_30b_a3b_pretrain_8gpu_b200_fp8mx_energon_config
+
 # Qwen3.5/Qwen3.6-VL GB200 models
 from .gb200.qwen35_vl import (
     qwen35_vl_27b_pretrain_16gpu_gb200_bf16_mock_config,
@@ -122,6 +125,7 @@ __all__ = [
     # Qwen3-VL pretrain configs
     "qwen3_vl_8b_pretrain_mock_config",
     "qwen3_vl_30b_a3b_pretrain_mock_config",
+    "qwen3_vl_30b_a3b_pretrain_8gpu_b200_fp8mx_energon_config",
     "qwen3_vl_235b_a22b_pretrain_mock_config",
     # Qwen3-VL SFT configs
     "qwen3_vl_8b_sft_config",

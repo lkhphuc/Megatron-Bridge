@@ -87,13 +87,17 @@ def _add_bytes(archive: tarfile.TarFile, name: str, payload: bytes) -> None:
     archive.addfile(info, io.BytesIO(payload))
 
 
-def build_shards(output_dir: Path) -> None:
+def build_shards(output_dir: Path, *, train_samples: int = 4) -> None:
     """Write deterministic train and validation WebDataset tar shards."""
+    if train_samples <= 0:
+        raise ValueError("train_samples must be greater than zero.")
     output_dir.mkdir(parents=True, exist_ok=True)
     for split, examples in EXAMPLES.items():
         shard_path = output_dir / f"{split}-shard-000000.tar"
         with tarfile.open(shard_path, "w") as archive:
-            for index, (color, question, answer) in enumerate(examples):
+            sample_count = train_samples if split == "train" else len(examples)
+            for index in range(sample_count):
+                color, question, answer = examples[index % len(examples)]
                 key = f"{split}-{index:06d}"
                 _add_bytes(archive, f"{key}.image.png", make_solid_png(color))
                 _add_bytes(archive, f"{key}.conversation.json", build_conversation(question, answer))
@@ -115,9 +119,11 @@ def write_dataset_yaml(output_dir: Path) -> None:
     (metadata_dir / "dataset.yaml").write_text(DATASET_YAML, encoding="utf-8")
 
 
-def prepare_example_data(output_dir: Path, *, run_prepare: bool = True, num_workers: int = 2) -> None:
+def prepare_example_data(
+    output_dir: Path, *, run_prepare: bool = True, num_workers: int = 2, train_samples: int = 4
+) -> None:
     """Build tutorial shards, optionally index them, and write ``dataset.yaml``."""
-    build_shards(output_dir)
+    build_shards(output_dir, train_samples=train_samples)
     if run_prepare:
         run_energon_prepare(output_dir, num_workers=num_workers)
     write_dataset_yaml(output_dir)
@@ -130,13 +136,24 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument(
+        "--train-samples",
+        type=int,
+        default=4,
+        help="Number of training samples; use at least one per GPU data worker for distributed runs.",
+    )
+    parser.add_argument(
         "--skip-prepare",
         action="store_true",
         help="Write shards and dataset.yaml without indexing the shards (useful for inspecting raw output).",
     )
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
-    prepare_example_data(args.output_dir, run_prepare=not args.skip_prepare, num_workers=args.num_workers)
+    prepare_example_data(
+        args.output_dir,
+        run_prepare=not args.skip_prepare,
+        num_workers=args.num_workers,
+        train_samples=args.train_samples,
+    )
 
 
 if __name__ == "__main__":

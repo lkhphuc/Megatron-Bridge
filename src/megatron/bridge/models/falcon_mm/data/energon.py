@@ -74,6 +74,7 @@ from megatron.bridge.models.falcon_mm.data.cookers import (
 )
 from megatron.bridge.models.falcon_mm.data.deepseek_v4_processor import FalconDeepseekv4Processor
 from megatron.bridge.models.falcon_mm.data.images import ImagePageRef, smart_resize
+from megatron.bridge.models.falcon_mm.data.llama3_processor import FalconLlama3Processor
 from megatron.bridge.models.falcon_mm.data.visual_markers import (
     FALCON_IMAGE_MARKER,
     IMAGE_MARKER_OVERHEAD_TOKENS,
@@ -292,6 +293,60 @@ class FalconDeepseekv4EnergonTaskEncoderConfig(FalconEnergonTaskEncoderConfig):
             image_processor = _QwenVLImageProcessor()
         self._apply_patch_geometry(image_processor)
         processor = FalconDeepseekv4Processor(
+            tokenizer,
+            image_processor,
+            spatial_merge_size=self.spatial_merge_size,
+        )
+        return FalconTaskEncoder(
+            tokenizer=tokenizer,
+            image_processor=processor,
+            **self._task_encoder_kwargs(
+                config,
+                effective_packing=effective_packing,
+                enable_energon_packing=enable_energon_packing,
+            ),
+        )
+
+
+@dataclass(kw_only=True)
+class FalconLlama3EnergonTaskEncoderConfig(FalconEnergonTaskEncoderConfig):
+    """Serializable settings for the Falcon-MM Llama3 Energon task encoder.
+
+    Patch geometry defaults match the Falcon patch embed (``patch_size=32``,
+    ``spatial_merge_size=1``, ``temporal_patch_size=1``). Keep the encoder
+    and model values aligned when overriding any of them.
+    """
+
+    hf_processor_path: str = "meta-llama/Meta-Llama-3-8B"
+    llama_tokenizer_path: str = ""
+    image_processor_path: str | None = None
+
+    def build_task_encoder(
+        self,
+        config: "EnergonDatasetConfig",
+        *,
+        effective_packing: bool,
+        enable_energon_packing: bool,
+        trust_remote_code: bool,
+    ) -> Any:
+        """Construct the Falcon-MM Llama3 task encoder at runtime."""
+        from transformers import AutoTokenizer
+
+        _require_energon_packing(enable_energon_packing)
+        tokenizer_path = self.llama_tokenizer_path.strip() or self.hf_processor_path
+        if not tokenizer_path:
+            raise ValueError("llama_tokenizer_path or hf_processor_path must be a non-empty string.")
+
+        tokenizer = AutoTokenizer.from_pretrained(
+            tokenizer_path,
+            trust_remote_code=trust_remote_code,
+        )
+        if self.image_processor_path:
+            image_processor = _QwenVLImageProcessor.from_pretrained(self.image_processor_path)
+        else:
+            image_processor = _QwenVLImageProcessor()
+        self._apply_patch_geometry(image_processor)
+        processor = FalconLlama3Processor(
             tokenizer,
             image_processor,
             spatial_merge_size=self.spatial_merge_size,

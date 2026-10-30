@@ -36,6 +36,18 @@ does **not** drop them. To filter out unusable tiny media, do it per source
 (omit the source, or add a source-specific skip), not via a large global
 `min_pixels`.
 
+The Falcon vision module uses a linear-only hMLP stem inspired by
+[Touvron et al., *Three things everyone should know about Vision Transformers*](https://arxiv.org/abs/2203.09795).
+With the default
+`patch_size=32` and `patch_embed_num_layers=3`, the starting cells are 4×4
+and the three linear stages merge them to 8×8, 16×16, and 32×32. The final
+linear stage produces one LM-width embedding per patch. For `patch_size=28`
+and two stages, the starting cells are 7×7. Each patch is processed independently;
+LayerNorm and GELU separate the linear stages. The Qwen-compatible processor
+still supplies flattened channel-first patches and `grid_thw`. Set
+`patch_embed_hidden_size` on a Falcon provider to choose the non-final stage
+width; by default it is one quarter of the LM width, rounded down.
+
 ```yaml
 subflavors:
   crude_type: mint
@@ -247,6 +259,27 @@ the DSv4 Flash-Base tokenizer, TP1/PP1/EP8, selective recompute
 bring-up only. Override with `RECIPE=...` / `SEQ_LENGTH=...` as needed.
 The dense 1B recipe is a smaller bring-up option; resize the mesh only after
 checking model fit and the intended data semantics.
+
+Dense Llama3-8B early-fusion sibling (plain 1D RoPE, from-scratch):
+
+```bash
+RECIPE=falcon_llama3_8b_pretrain_8gpu_b200_bf16_config \
+  NUM_GPUS=8 SEQ_LENGTH=4096 \
+  ENERGON_PATH=/mnt/datasets/falcon_pretrain_mixture.yaml \
+  bash examples/models/falcon_mm/thd_energon.sh
+```
+
+Uses a Llama3 tokenizer with reserved special tokens as visual markers,
+TP1/PP1/CP1, selective ``core_attn`` recompute. ``meta-llama/Meta-Llama-3-8B``
+is gated: set ``LLAMA3_TOKENIZER_PATH`` to a local tokenizer snapshot, or place
+one at ``${WORKSPACE}/hf/Meta-Llama-3-8B-tokenizer`` (``thd_energon.sh`` picks
+that up automatically).
+
+Low-precision siblings (same mesh / Energon packing; from library Llama3-8B)::
+
+    RECIPE=falcon_llama3_8b_pretrain_8gpu_b200_fp8mx_config   # MXFP8
+    RECIPE=falcon_llama3_8b_pretrain_8gpu_b200_fp8cs_config   # FP8 current scaling
+    RECIPE=falcon_llama3_8b_pretrain_8gpu_b200_nvfp4_config   # NVFP4 (last 4 layers BF16)
 
 
 

@@ -76,18 +76,24 @@ class TestFalconDeepseekv4ModelProvider:
         assert provider.temporal_patch_size == 1
         assert provider.spatial_merge_size == 1
         assert provider.in_channels == 3
-        assert provider.patch_embed_hidden_size == 1024
+        assert provider.patch_embed_num_layers == 3
 
     def test_patch_embed_config_fields(self):
         provider = _minimal_dsv4_provider()
         config = provider._build_patch_embed_config()
-        assert config.hidden_size == provider.patch_embed_hidden_size
+        assert config.hidden_size == provider.hidden_size // 4
         assert config.out_hidden_size == provider.hidden_size
         assert config.patch_size == provider.patch_size
         assert config.temporal_patch_size == provider.temporal_patch_size
         assert config.in_channels == provider.in_channels
         assert config.spatial_merge_size == provider.spatial_merge_size
         assert config.pipeline_model_parallel_size == 1
+
+    def test_custom_patch_embed_hidden_size_sets_intermediate_width(self):
+        provider = _minimal_dsv4_provider()
+        provider.patch_embed_hidden_size = 111
+        config = provider._build_patch_embed_config()
+        assert config.hidden_size == 111
 
     def test_pattern_is_architecture_source_of_truth(self):
         provider = _minimal_dsv4_provider()

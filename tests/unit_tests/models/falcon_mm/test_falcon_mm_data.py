@@ -51,11 +51,15 @@ from megatron.bridge.models.falcon_mm.data.images import (
     assemble_mint_sequence,
     smart_resize,
 )
+from megatron.bridge.models.falcon_mm.data.llama3_processor import FalconLlama3Processor
 from megatron.bridge.models.falcon_mm.data.visual_markers import (
     DSV4_IMAGE_PAD_TOKEN,
     DSV4_VISION_END_TOKEN,
     DSV4_VISION_START_TOKEN,
     FALCON_IMAGE_MARKER,
+    LLAMA3_IMAGE_PAD_TOKEN,
+    LLAMA3_VISION_END_TOKEN,
+    LLAMA3_VISION_START_TOKEN,
 )
 from megatron.bridge.models.qwen_vl.data.energon import QwenVLTaskEncoder, QwenVLTaskSample
 
@@ -723,3 +727,71 @@ class TestFalconDeepseekv4Encoder:
         assert labels.count(IGNORE_INDEX) >= 2
         assert all(mask == 0.0 for label, mask in zip(labels, loss_mask.tolist()) if label == IGNORE_INDEX)
         assert loss_mask[-1] == 0
+
+
+class TestFalconLlama3Processor:
+    def _processor(self, *, with_markers: bool = True):
+        from tokenizers import Tokenizer
+        from tokenizers.models import WordLevel
+        from tokenizers.pre_tokenizers import Whitespace
+        from transformers import PreTrainedTokenizerFast, Qwen2VLImageProcessor
+
+        vocab = {"<unk>": 0, "hello": 1, "world": 2, "cap": 3, "tail": 4}
+        if with_markers:
+            vocab[LLAMA3_IMAGE_PAD_TOKEN] = 5
+            vocab[LLAMA3_VISION_START_TOKEN] = 6
+            vocab[LLAMA3_VISION_END_TOKEN] = 7
+        backend = Tokenizer(WordLevel(vocab, unk_token="<unk>"))
+        backend.pre_tokenizer = Whitespace()
+        tokenizer = PreTrainedTokenizerFast(
+            tokenizer_object=backend,
+            unk_token="<unk>",
+            pad_token="<unk>",
+            eos_token="<unk>",
+        )
+        image_processor = Qwen2VLImageProcessor(
+            size={"shortest_edge": 32, "longest_edge": 256},
+            patch_size=32,
+            temporal_patch_size=FALCON_DEFAULT_TEMPORAL_PATCH_SIZE,
+            merge_size=1,
+        )
+        return (
+            FalconLlama3Processor(tokenizer, image_processor, spatial_merge_size=1),
+            tokenizer,
+            image_processor,
+        )
+
+    def test_placeholder_expansion_and_order(self):
+        """Each marker expands to [vision_start] + [image_pad x N] + [vision_end]."""
+        processor, tokenizer, image_processor = self._processor()
+        images = [Image.new("RGB", (64, 64), "red"), Image.new("RGB", (128, 64), "blue")]
+        document = f"hello\n{FALCON_IMAGE_MARKER}\ncap\n{FALCON_IMAGE_MARKER}\ntail"
+        result = processor(text=[document], images=images, return_tensors="pt")
+        grids = image_processor(images=images, return_tensors="pt")["image_grid_thw"]
+        spans = [int(grids[i].prod().item()) for i in range(2)]
+        pad_id = tokenizer.convert_tokens_to_ids(LLAMA3_IMAGE_PAD_TOKEN)
+        start_id = tokenizer.convert_tokens_to_ids(LLAMA3_VISION_START_TOKEN)
+        end_id = tokenizer.convert_tokens_to_ids(LLAMA3_VISION_END_TOKEN)
+        assert processor.marker_ids.vision_start_id == start_id
+        assert processor.marker_ids.image_pad_id == pad_id
+        assert processor.marker_ids.vision_end_id == end_id
+        assert processor.image_token_id == pad_id
+        expected = (
+            [tokenizer.convert_tokens_to_ids("hello")]
+            + [start_id]
+            + [pad_id] * spans[0]
+            + [end_id]
+            + [tokenizer.convert_tokens_to_ids("cap")]
+            + [start_id]
+            + [pad_id] * spans[1]
+            + [end_id]
+            + [tokenizer.convert_tokens_to_ids("tail")]
+        )
+        assert result["input_ids"][0].tolist() == expected
+
+    def test_marker_mismatch_and_missing_markers(self):
+        processor, _, _ = self._processor()
+        with pytest.raises(ValueError, match="image marker"):
+            processor(text=[f"hello\n{FALCON_IMAGE_MARKER}\nworld"], images=[])
+        with pytest.raises(ValueError, match="reserved visual marker"):
+            self._processor(with_markers=False)
